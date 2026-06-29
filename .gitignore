@@ -1,0 +1,11 @@
+.next
+node_modules
+dist
+coverage
+.env
+.env.local
+pnpm-debug.log*
+*.tsbuildinfo
+pnpm-workspace.yaml.*
+dev-server*.log
+.codex-dev-*.log
