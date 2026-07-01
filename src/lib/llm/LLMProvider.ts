@@ -1,4 +1,8 @@
-import type { ArgumentComparison } from "@/types/comparison";
+import type {
+  ArgumentComparison,
+  SemanticAlignmentRow,
+  SemanticDifferenceDetail
+} from "@/types/comparison";
 
 export type GenerateDocumentInput = {
   prompt: string;
@@ -68,6 +72,22 @@ export type ArgumentComparisonOutput = {
   comparison: ArgumentComparison;
 };
 
+export type SemanticDifferenceDetailInput = {
+  documentId: string;
+  anchorId: string;
+  row: SemanticAlignmentRow;
+  originalText: string;
+  revisedText: string;
+  localQuestion?: string;
+  annotations?: string[];
+  contextSummary?: string;
+  model?: string;
+};
+
+export type SemanticDifferenceDetailOutput = {
+  detail: SemanticDifferenceDetail;
+};
+
 export type ChatMessageInput = {
   systemPrompt: string;
   userMessage: string;
@@ -93,5 +113,8 @@ export interface LLMProvider {
   generateArgumentComparison(
     input: ArgumentComparisonInput
   ): Promise<ArgumentComparisonOutput>;
+  generateSemanticDifferenceDetail(
+    input: SemanticDifferenceDetailInput
+  ): Promise<SemanticDifferenceDetailOutput>;
   sendChatMessage(input: ChatMessageInput): Promise<ChatMessageOutput>;
 }

@@ -44,6 +44,9 @@ export function SideThreadPanel() {
   const isAskingLocalQuestion = useAnswerAtlasStore(
     (state) => state.isAskingLocalQuestion
   );
+  const isGeneratingComparison = useAnswerAtlasStore(
+    (state) => state.isGeneratingComparison
+  );
   const revisionSuggestions = useAnswerAtlasStore(
     (state) => state.revisionSuggestions
   );
@@ -167,6 +170,9 @@ export function SideThreadPanel() {
 
   const isDeleted = thread?.status === "deleted";
   const isHidden = thread?.visibility === "hidden" && !isDeleted;
+  const showLocalThinking = Boolean(
+    thread && isAskingLocalQuestion && !isDeleted && !isHidden
+  );
 
   return (
     <section className="panel min-h-0 overflow-hidden rounded-lg max-[900px]:h-[520px]">
@@ -300,12 +306,29 @@ export function SideThreadPanel() {
                       onAddNote={(selection) => handleNestedNote(selection, message)}
                     />
                   ))}
+                  {showLocalThinking && (
+                    <article className="rounded-lg border border-line bg-white p-3 text-sm font-semibold leading-6 text-muted shadow-sm">
+                      <div className="flex items-center gap-2">
+                        <Sparkles size={17} className="animate-pulse text-atlasPurple" />
+                        Assistant is thinking...
+                      </div>
+                    </article>
+                  )}
                 </div>
               )}
 
-              {!isDeleted && !isHidden && threadMessages.length === 0 && (
+              {!isDeleted && !isHidden && threadMessages.length === 0 && !showLocalThinking && (
                 <div className="rounded-lg border border-dashed border-line bg-slate-50 p-4 text-sm text-muted">
                   No local answer yet.
+                </div>
+              )}
+
+              {!isDeleted && !isHidden && isGeneratingComparison && (
+                <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm font-semibold leading-6 text-atlasBlue">
+                  <div className="flex items-center gap-2">
+                    <Sparkles size={17} className="animate-pulse" />
+                    Generating comparison map...
+                  </div>
                 </div>
               )}
 

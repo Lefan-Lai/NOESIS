@@ -6,6 +6,7 @@ import type {
   LayeredComparisonScaffold
 } from "@/types/comparison";
 import { boardToLayeredComparisonScaffold } from "./boardCompatibility";
+import { createSemanticDifferenceMapFromTexts } from "./semanticDifferenceMap";
 
 function shortText(text: string, limit = 120) {
   return text.length > limit ? `${text.slice(0, limit - 3)}...` : text;
@@ -270,12 +271,21 @@ export function createArgumentComparisonFromTexts({
     revisedText
   });
   const scaffold = boardToLayeredComparisonScaffold(board);
+  const semanticMap = createSemanticDifferenceMapFromTexts({
+    id: `semantic-map-${idSuffix}`,
+    documentId,
+    anchorId,
+    originalText,
+    revisedText,
+    createdAt: now
+  });
 
   return {
     id: `comparison-${idSuffix}`,
     documentId,
     anchorId,
     createdInVersionNodeId,
+    semanticMap,
     board,
     scaffold,
     status: "active",

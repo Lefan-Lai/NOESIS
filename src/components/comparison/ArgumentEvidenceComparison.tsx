@@ -1,15 +1,11 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Bot, Maximize2, MoreHorizontal, Send, UserRound } from "lucide-react";
+import { Bot, Loader2, Maximize2, MoreHorizontal, Send, UserRound } from "lucide-react";
 import { useAnswerAtlasStore } from "@/store/useAnswerAtlasStore";
 import { getComparisonForAnchor } from "@/lib/comparison/buildArgumentComparison";
-import { LayeredComparisonBoard } from "./LayeredComparisonBoard";
-import { LayeredComparisonScaffoldView } from "./LayeredComparisonScaffoldView";
-import {
-  ViewModeToggle,
-  type ComparisonViewMode
-} from "./ViewModeToggle";
+import { semanticMapFromLayeredComparisonBoard } from "@/lib/comparison/semanticDifferenceMap";
+import { SemanticDifferenceMapView } from "./SemanticDifferenceMapView";
 
 function getAnchorLabel(blockId?: string) {
   return blockId ? blockId.toUpperCase() : "-";
@@ -18,7 +14,6 @@ function getAnchorLabel(blockId?: string) {
 export function ArgumentEvidenceComparison() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [treeQuestion, setTreeQuestion] = useState("");
-  const [viewMode, setViewMode] = useState<ComparisonViewMode>("board");
   const comparisons = useAnswerAtlasStore((state) => state.comparisons);
   const anchors = useAnswerAtlasStore((state) => state.anchors);
   const selectedAnchorId = useAnswerAtlasStore((state) => state.selectedAnchorId);
@@ -37,6 +32,9 @@ export function ArgumentEvidenceComparison() {
   const isSendingWindowMessage = useAnswerAtlasStore(
     (state) => state.isSendingWindowMessage
   );
+  const isGeneratingComparison = useAnswerAtlasStore(
+    (state) => state.isGeneratingComparison
+  );
   const selectedAnchor = selectedAnchorId ? anchors[selectedAnchorId] : null;
   const isComparisonExpanded = useAnswerAtlasStore(
     (state) => state.isComparisonExpanded
@@ -50,6 +48,9 @@ export function ArgumentEvidenceComparison() {
   const treeSession = treeWindow
     ? sessions[treeWindow.conversationSessionId]
     : null;
+  const isTreeThinking = treeWindow
+    ? Boolean(isSendingWindowMessage[treeWindow.id])
+    : false;
   const treeMessages = useMemo(
     () =>
       Object.values(conversationMessages)
@@ -64,6 +65,21 @@ export function ArgumentEvidenceComparison() {
         ),
     [conversationMessages, treeSession?.id]
   );
+  const semanticMap = useMemo(() => {
+    if (!comparison) {
+      return null;
+    }
+
+    return (
+      comparison.semanticMap ??
+      semanticMapFromLayeredComparisonBoard({
+        board: comparison.board,
+        documentId: comparison.documentId,
+        anchorId: comparison.anchorId,
+        createdAt: comparison.createdAt
+      })
+    );
+  }, [comparison]);
 
   async function submitTreeQuestion() {
     if (!treeQuestion.trim()) {
@@ -86,13 +102,16 @@ export function ArgumentEvidenceComparison() {
         <div className="flex h-14 items-center justify-between border-b border-line px-4">
           <div>
             <h2 className="text-lg font-bold text-ink">
-              Layered Comparison Board
+              Semantic Difference Map
             </h2>
-            <p className="text-sm text-muted">Original vs Revised</p>
+            <p className="text-sm text-muted">Semantic alignment of original vs revised</p>
           </div>
           <div className="flex items-center gap-1">
-            {comparison && (
-              <ViewModeToggle value={viewMode} onChange={setViewMode} />
+            {isGeneratingComparison && (
+              <span className="mr-1 inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-atlasBlue">
+                <Loader2 size={13} className="animate-spin" />
+                Generating
+              </span>
             )}
             {treeWindow && (
               <select
@@ -149,13 +168,17 @@ export function ArgumentEvidenceComparison() {
         </div>
 
         <div className="thin-scrollbar min-h-0 flex-1 overflow-auto p-4">
+          {isGeneratingComparison && (
+            <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-semibold text-atlasBlue shadow-sm">
+              <div className="flex items-center gap-2">
+                <Loader2 size={17} className="animate-spin" />
+                Semantic map is generating...
+              </div>
+            </div>
+          )}
           {comparison ? (
             <div className="space-y-4">
-              {viewMode === "board" ? (
-                <LayeredComparisonBoard board={comparison.board} />
-              ) : (
-                <LayeredComparisonScaffoldView scaffold={comparison.scaffold} />
-              )}
+              {semanticMap && <SemanticDifferenceMapView map={semanticMap} />}
               <div className="rounded-lg border border-line bg-slate-50/70 p-3">
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <div className="text-sm font-bold text-ink">
@@ -166,7 +189,7 @@ export function ArgumentEvidenceComparison() {
                   </div>
                 </div>
                 <div className="mb-3 max-h-48 space-y-2 overflow-auto">
-                  {treeMessages.length === 0 ? (
+                  {treeMessages.length === 0 && !isTreeThinking ? (
                     <div className="rounded-md border border-dashed border-line bg-white p-3 text-sm text-muted">
                       Ask about semantic changes, risks, or merge consequences.
                     </div>
@@ -198,6 +221,14 @@ export function ArgumentEvidenceComparison() {
                       );
                     })
                   )}
+                  {isTreeThinking && (
+                    <article className="rounded-md border border-line bg-white px-3 py-2 text-sm font-semibold leading-6 text-muted">
+                      <div className="flex items-center gap-2">
+                        <Loader2 size={15} className="animate-spin text-atlasPurple" />
+                        Board Assistant is thinking...
+                      </div>
+                    </article>
+                  )}
                 </div>
                 <div className="flex gap-2">
                   <input
@@ -211,7 +242,7 @@ export function ArgumentEvidenceComparison() {
                     disabled={
                       !treeWindow ||
                       !treeQuestion.trim() ||
-                      Boolean(isSendingWindowMessage[treeWindow.id])
+                      isTreeThinking
                     }
                     className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-atlasBlue text-white disabled:opacity-50"
                     title="Send"
@@ -224,7 +255,16 @@ export function ArgumentEvidenceComparison() {
             </div>
           ) : (
             <div className="grid h-full place-items-center text-sm text-muted">
-              Ask a local question on a selected passage to generate comparison.
+              {isGeneratingComparison ? (
+                <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 font-semibold text-atlasBlue shadow-sm">
+                  <div className="flex items-center gap-2">
+                    <Loader2 size={17} className="animate-spin" />
+                    Generating semantic comparison...
+                  </div>
+                </div>
+              ) : (
+                "Ask a local question on a selected passage to generate comparison."
+              )}
             </div>
           )}
         </div>

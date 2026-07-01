@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent, PointerEvent, WheelEvent } from "react";
+import type { MouseEvent, PointerEvent } from "react";
 import { RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
 import type {
   ComparisonSlot,
@@ -377,11 +377,6 @@ export function LayeredComparisonScaffoldView({
     setTransform({ ...defaultTransform });
   }
 
-  function handleWheel(event: WheelEvent<HTMLDivElement>) {
-    event.preventDefault();
-    zoomBy(event.deltaY > 0 ? 0.92 : 1.08);
-  }
-
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) {
       return;
@@ -500,7 +495,6 @@ export function LayeredComparisonScaffoldView({
           className={`thin-scrollbar h-[430px] overflow-auto bg-slate-50 p-4 ${
             isPanning ? "cursor-grabbing" : "cursor-grab"
           }`}
-          onWheel={handleWheel}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}

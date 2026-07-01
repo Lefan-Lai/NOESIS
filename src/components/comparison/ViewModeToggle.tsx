@@ -1,6 +1,6 @@
 "use client";
 
-export type ComparisonViewMode = "board" | "graph";
+export type ComparisonViewMode = "map" | "graph";
 
 type ViewModeToggleProps = {
   value: ComparisonViewMode;
@@ -10,7 +10,7 @@ type ViewModeToggleProps = {
 export function ViewModeToggle({ value, onChange }: ViewModeToggleProps) {
   return (
     <div className="flex rounded-md border border-line bg-white p-0.5">
-      {(["board", "graph"] as const).map((mode) => {
+      {(["map", "graph"] as const).map((mode) => {
         const active = value === mode;
 
         return (
@@ -24,7 +24,7 @@ export function ViewModeToggle({ value, onChange }: ViewModeToggleProps) {
                 : "text-slate-600 hover:bg-slate-50"
             }`}
           >
-            {mode === "board" ? "Board View" : "Advanced Graph"}
+            {mode === "map" ? "Map View" : "Advanced Graph"}
           </button>
         );
       })}

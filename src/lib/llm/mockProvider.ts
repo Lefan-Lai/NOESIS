@@ -7,9 +7,12 @@ import type {
   GenerateDocumentOutput,
   LLMProvider,
   LocalQuestionInput,
-  LocalQuestionOutput
+  LocalQuestionOutput,
+  SemanticDifferenceDetailInput,
+  SemanticDifferenceDetailOutput
 } from "./LLMProvider";
 import { createArgumentComparisonFromTexts } from "@/lib/comparison/createArgumentComparison";
+import { createSemanticDifferenceDetailFallback } from "@/lib/comparison/semanticDifferenceMap";
 
 export class MockLLMProvider implements LLMProvider {
   async generateDocument(
@@ -46,6 +49,14 @@ export class MockLLMProvider implements LLMProvider {
         revisedText: input.revisedText,
         createdInVersionNodeId: input.createdInVersionNodeId
       })
+    };
+  }
+
+  async generateSemanticDifferenceDetail(
+    input: SemanticDifferenceDetailInput
+  ): Promise<SemanticDifferenceDetailOutput> {
+    return {
+      detail: createSemanticDifferenceDetailFallback(input.row)
     };
   }
 

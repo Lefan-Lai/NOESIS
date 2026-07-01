@@ -246,7 +246,8 @@ function applyProjectSnapshot(
     pendingPatch: [],
     contextPreview: null,
     isSideThreadOpen: false,
-    isSideThreadMinimized: false
+    isSideThreadMinimized: false,
+    isGeneratingComparison: false
   };
 }
 
@@ -284,6 +285,7 @@ export type AnswerAtlasState = {
   isLoadingModels: boolean;
   isGeneratingDocument: boolean;
   isAskingLocalQuestion: boolean;
+  isGeneratingComparison: boolean;
   isSendingWindowMessage: Record<string, boolean>;
   isNavigationCollapsed: boolean;
   isSideThreadOpen: boolean;
@@ -630,6 +632,7 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
   isLoadingModels: false,
   isGeneratingDocument: false,
   isAskingLocalQuestion: false,
+  isGeneratingComparison: false,
   isSendingWindowMessage: {},
   isNavigationCollapsed: false,
   isSideThreadOpen: false,
@@ -1605,6 +1608,8 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
         appendConversationMessages({
           state: {
             ...current,
+            isAskingLocalQuestion: false,
+            isGeneratingComparison: Boolean(revisedText),
             messages: {
               ...current.messages,
               [userMessage.id]: userMessage,
@@ -1682,7 +1687,7 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
                 id: treeWindowId(data.output.comparison.id),
                 workspaceId: current.currentProjectId,
                 windowType: "tree_compare",
-                title: "Layered Comparison Board",
+                title: "Semantic Difference Map",
                 conversationSessionId: treeSessionId(data.output.comparison.id),
                 modelConfigId: data.model,
                 contextScope: treeContextScope({
@@ -1722,7 +1727,7 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
       }
     }
 
-    set({ isAskingLocalQuestion: false });
+    set({ isAskingLocalQuestion: false, isGeneratingComparison: false });
 
     get().refreshContextPreview();
   },
@@ -1806,7 +1811,7 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
               type: "comparison_board",
               text: JSON.stringify(comparison.board),
               reason:
-                "Layered Comparison Board context: board summary, levels, rows, differences, and selected revision evidence."
+                "Semantic Difference Map context: compact semantic alignment rows, differences, risk, and selected revision evidence."
             }
           ]
         })

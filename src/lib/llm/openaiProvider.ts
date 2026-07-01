@@ -7,7 +7,9 @@ import type {
   GenerateDocumentOutput,
   LLMProvider,
   LocalQuestionInput,
-  LocalQuestionOutput
+  LocalQuestionOutput,
+  SemanticDifferenceDetailInput,
+  SemanticDifferenceDetailOutput
 } from "./LLMProvider";
 import type {
   ArgumentComparison,
@@ -16,7 +18,8 @@ import type {
   ComparisonEdge,
   ComparisonSlot,
   LayeredComparisonBoard,
-  LayeredComparisonScaffold
+  LayeredComparisonScaffold,
+  SemanticDifferenceMap
 } from "@/types/comparison";
 import {
   sortComparisonSlots
@@ -26,6 +29,13 @@ import {
   scaffoldToLayeredComparisonBoard
 } from "@/lib/comparison/boardCompatibility";
 import { validateLayeredComparisonBoard } from "@/lib/comparison/validateLayeredComparisonBoard";
+import {
+  applySemanticMapProgramRules,
+  createSemanticDifferenceDetailFallback,
+  createSemanticDifferenceMapFromTexts,
+  semanticMapToLayeredComparisonBoard
+} from "@/lib/comparison/semanticDifferenceMap";
+import { validateSemanticDifferenceMap } from "@/lib/comparison/validateSemanticDifferenceMap";
 import { createOpenAIResponse, parseJsonObject } from "./openaiResponses";
 
 type OpenAIProviderOptions = {
@@ -537,6 +547,89 @@ function buildComparisonFromBoard(
   };
 }
 
+function normalizeSemanticMapForInput(
+  input: ArgumentComparisonInput,
+  map: SemanticDifferenceMap | null
+): SemanticDifferenceMap | null {
+  if (!map || typeof map !== "object") {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+
+  return {
+    ...map,
+    id: map.id || `semantic-map-${input.anchorId}`,
+    documentId: input.documentId,
+    anchorId: input.anchorId,
+    originalText: input.originalText,
+    revisedText: input.revisedText,
+    createdAt: map.createdAt || now
+  };
+}
+
+function buildComparisonFromSemanticMap(
+  input: ArgumentComparisonInput,
+  semanticMap: SemanticDifferenceMap
+): ArgumentComparison {
+  const now = new Date().toISOString();
+  const id = `comparison-${input.anchorId}-${Date.now().toString(36)}`;
+  const normalizedMap: SemanticDifferenceMap = {
+    ...semanticMap,
+    id,
+    documentId: input.documentId,
+    anchorId: input.anchorId,
+    originalText: input.originalText,
+    revisedText: input.revisedText,
+    createdAt: semanticMap.createdAt || now
+  };
+  const board = semanticMapToLayeredComparisonBoard(normalizedMap);
+  const scaffold = boardToLayeredComparisonScaffold(board);
+  const prefix = `cmp-${id}`;
+  const originalTree = buildLegacyTreeFromScaffold({
+    scaffold,
+    side: "original",
+    prefix
+  });
+  const revisedTree = buildLegacyTreeFromScaffold({
+    scaffold,
+    side: "revised",
+    prefix
+  });
+  const comparisonEdges = sortComparisonSlots(scaffold.slots)
+    .filter((slot) => slot.original_node && slot.revised_node)
+    .map((slot, index) => ({
+      id: `${prefix}-edge-${index + 1}`,
+      fromOriginalNodeId: `${prefix}-original-${slot.slot_id}`,
+      toRevisedNodeId: `${prefix}-revised-${slot.slot_id}`,
+      label: slot.relation,
+      edgeType:
+        slot.relation === "expanded"
+          ? "evidence_added" as const
+          : slot.relation === "refined"
+            ? "claim_refined" as const
+            : slot.relation === "same"
+              ? "support_strengthened" as const
+              : "wording_improvement" as const
+    }));
+
+  return {
+    id,
+    documentId: input.documentId,
+    anchorId: input.anchorId,
+    semanticMap: normalizedMap,
+    board,
+    scaffold,
+    originalTree,
+    revisedTree,
+    comparisonEdges,
+    createdInVersionNodeId: input.createdInVersionNodeId,
+    status: "active",
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
 const layeredComparisonBoardSystemPrompt = `You are generating a Layered Comparison Board for comparing an original answer and a revised answer.
 
 Do not generate a tree.
@@ -620,6 +713,146 @@ Return JSON in this schema:
 }`;
 }
 
+const semanticDifferenceMapSystemPrompt = `You generate Stage 1 of a Semantic Difference Map: a compact Semantic Map Index.
+
+Do not generate a tree.
+Do not generate graph nodes.
+Do not generate word-level diff.
+Do not generate visual coordinates, SVG, React components, CSS, or layout code.
+Do not generate long local explanations.
+Do not generate why-it-matters paragraphs.
+Do not generate context-impact paragraphs.
+
+Generate concise JSON only.
+
+Core rules:
+- Split the original and revised answers into semantic blocks, not sentences.
+- Align semantic blocks by meaning and role, not by exact wording.
+- Each row must describe one semantic block alignment.
+- Prefer 3 to 6 important rows. Use at most 8 rows unless truly necessary.
+- Do not over-generate minor wording changes.
+- Use the fixed enum values from the schema only.
+- If a change is minor, mark importance as low.
+- If alignment is uncertain, use alignmentType unmatched, confidence low, and risk medium or high.
+- UI layout, counts, risk aggregation, sorting, collapsing, colors, and detail display are handled by program rules.
+- Stage 1 rows must be compact.`;
+
+function semanticDifferenceMapUserPrompt(input: ArgumentComparisonInput) {
+  const contextSummary = contextToText((input.contextItems ?? []).slice(0, 6));
+
+  return `Generate a Semantic Difference Map.
+
+Original selected text:
+${input.originalText}
+
+Revised answer:
+${input.revisedText}
+
+Local question:
+${input.localQuestion ?? ""}
+
+Local answer:
+${input.localAnswer ?? ""}
+
+Relevant active-path context summary:
+${contextSummary || "No additional context."}
+
+Return valid JSON in this exact Stage 1 shape:
+
+{
+  "id": "temporary-id",
+  "documentId": "${input.documentId}",
+  "anchorId": "${input.anchorId}",
+  "originalText": "copy original selected text",
+  "revisedText": "copy revised answer",
+  "overview": {
+    "mainSummary": "one concise sentence",
+    "meaningEffect": "meaning_preserved | meaning_narrowed | meaning_expanded | meaning_shifted | meaning_unclear",
+    "riskLevel": "none | low | medium | high",
+    "counts": { "added": 0, "removed": 0, "rewritten": 0, "moved": 0, "claimChanged": 0, "toneChanged": 0 }
+  },
+  "rows": [
+    {
+      "id": "row-1",
+      "blockType": "claim | reason | evidence | example | definition | limitation | method | result | interpretation | conclusion | transition | other",
+      "originalBlock": {
+        "id": "original-1",
+        "blockType": "claim | reason | evidence | example | definition | limitation | method | result | interpretation | conclusion | transition | other",
+        "text": "semantic original block text, not the full answer",
+        "preview": "short preview"
+      },
+      "revisedBlock": {
+        "id": "revised-1",
+        "blockType": "claim | reason | evidence | example | definition | limitation | method | result | interpretation | conclusion | transition | other",
+        "text": "semantic revised block text, not the full answer",
+        "preview": "short preview"
+      },
+      "originalIndex": 1,
+      "revisedIndex": 1,
+      "alignmentType": "one_to_one | one_to_many | many_to_one | added_only | removed_only | moved | unmatched",
+      "primaryChange": "unchanged | added | removed | rewritten | moved | split | merged",
+      "semanticTags": ["claim_softened"],
+      "importance": "critical | high | medium | low",
+      "risk": "none | low | medium | high",
+      "triggeredBy": "user_question | annotation | llm_inference | context_alignment | unknown",
+      "confidence": "high | medium | low"
+    }
+  ],
+  "createdAt": "temporary date"
+}
+
+For added_only rows, omit originalBlock. For removed_only rows, omit revisedBlock. Do not leave blank objects.
+Do not invent primaryChange values such as improved, enhanced, better, refined, optimized, or clarified.
+
+Allowed semanticTags only:
+claim_changed, claim_softened, claim_strengthened, scope_expanded, scope_narrowed, evidence_added, evidence_removed, example_added, example_removed, limitation_added, definition_added, logic_clarified, tone_more_cautious, tone_more_confident, tone_more_academic, wording_simplified, wording_more_precise, structure_reordered, risk_introduced, context_aligned.`;
+}
+
+const semanticDifferenceDetailSystemPrompt = `You generate Stage 2 of a Semantic Difference Map: Local Difference Explanation.
+
+Only explain the selected row. Do not explain other rows.
+Do not generate a tree, graph, word-level diff, UI code, or JSON outside the requested schema.
+Use the selected row, original block, revised block, local question, active annotations, and context summary.
+Return valid JSON only.`;
+
+function semanticDifferenceDetailUserPrompt(input: SemanticDifferenceDetailInput) {
+  return `Generate Local Difference Explanation for this selected semantic alignment row.
+
+Selected row JSON:
+${JSON.stringify(input.row)}
+
+Original full block:
+${input.row.originalBlock?.text ?? input.originalText}
+
+Revised full block:
+${input.row.revisedBlock?.text ?? input.revisedText}
+
+Local question:
+${input.localQuestion ?? ""}
+
+Active annotations:
+${input.annotations?.length ? input.annotations.join("\n") : "None"}
+
+Necessary context summary:
+${input.contextSummary ?? "No additional context."}
+
+Return valid JSON in this exact shape:
+
+{
+  "rowId": "${input.row.id}",
+  "originalFullBlock": "string",
+  "revisedFullBlock": "string",
+  "primaryChange": "unchanged | added | removed | rewritten | moved | split | merged",
+  "semanticTags": ["claim_softened"],
+  "explanation": "concise explanation of what changed",
+  "whyItMatters": "why this matters for meaning, scope, evidence, or user decision",
+  "triggeredBy": "user_question | annotation | llm_inference | context_alignment | unknown",
+  "risk": "none | low | medium | high",
+  "contextImpact": "how future local context should treat this change",
+  "confidence": "high | medium | low"
+}`;
+}
+
 export class OpenAIProvider implements LLMProvider {
   private apiKey: string;
 
@@ -694,57 +927,76 @@ export class OpenAIProvider implements LLMProvider {
       input: [
         {
           role: "system",
-          content: layeredComparisonBoardSystemPrompt
+          content: semanticDifferenceMapSystemPrompt
         },
         {
           role: "user",
-          content: layeredComparisonBoardUserPrompt(input)
+          content: semanticDifferenceMapUserPrompt(input)
         }
       ]
     });
 
-    let board = parseJsonObject<LayeredComparisonBoard | null>(text, null);
-    let validation = board
-      ? validateLayeredComparisonBoard(board)
+    const parsedMap = normalizeSemanticMapForInput(
+      input,
+      parseJsonObject<SemanticDifferenceMap | null>(text, null)
+    );
+    const programRuledMap = parsedMap
+      ? applySemanticMapProgramRules(parsedMap)
+      : null;
+    const validation = parsedMap
+      ? validateSemanticDifferenceMap(programRuledMap as SemanticDifferenceMap)
       : {
           valid: false,
           errors: ["The selected model did not return JSON."]
         };
-
-    if (!validation.valid) {
-      const repairText = await createOpenAIResponse({
-        apiKey: this.apiKey,
-        model: input.model ?? "gpt-4.1",
-        input: [
-          {
-            role: "system",
-            content:
-              "The previous JSON output is invalid for the LayeredComparisonBoard schema. Repair it without changing the intended comparison meaning. Return repaired valid JSON only."
-          },
-          {
-            role: "user",
-            content: `Validation errors:\n${validation.errors.join("\n")}\n\nOriginal answer:\n${input.originalText}\n\nRevised answer:\n${input.revisedText}\n\nInvalid JSON:\n${text}\n\nReturn repaired valid JSON only.`
-          }
-        ]
-      });
-
-      board = parseJsonObject<LayeredComparisonBoard | null>(repairText, null);
-      validation = board
-        ? validateLayeredComparisonBoard(board)
-        : {
-            valid: false,
-            errors: ["Repair did not return JSON."]
-          };
-    }
-
-    if (!board || !validation.valid) {
-      throw new Error(
-        `The selected model did not return a valid layered comparison board: ${validation.errors.join("; ")}`
-      );
-    }
+    const semanticMap =
+      programRuledMap && validation.valid
+        ? programRuledMap
+        : applySemanticMapProgramRules(createSemanticDifferenceMapFromTexts({
+            id: `semantic-map-${input.anchorId}-${Date.now().toString(36)}`,
+            documentId: input.documentId,
+            anchorId: input.anchorId,
+            originalText: input.originalText,
+            revisedText: input.revisedText,
+            localQuestion: input.localQuestion
+          }));
 
     return {
-      comparison: buildComparisonFromBoard(input, board)
+      comparison: buildComparisonFromSemanticMap(input, semanticMap)
+    };
+  }
+
+  async generateSemanticDifferenceDetail(
+    input: SemanticDifferenceDetailInput
+  ): Promise<SemanticDifferenceDetailOutput> {
+    const text = await createOpenAIResponse({
+      apiKey: this.apiKey,
+      model: input.model ?? "gpt-4.1",
+      input: [
+        {
+          role: "system",
+          content: semanticDifferenceDetailSystemPrompt
+        },
+        {
+          role: "user",
+          content: semanticDifferenceDetailUserPrompt(input)
+        }
+      ]
+    });
+    const fallback = createSemanticDifferenceDetailFallback(input.row);
+    const parsed = parseJsonObject<typeof fallback>(text, fallback);
+
+    return {
+      detail: {
+        ...fallback,
+        ...parsed,
+        rowId: input.row.id,
+        primaryChange: input.row.primaryChange,
+        semanticTags: parsed.semanticTags?.length ? parsed.semanticTags : input.row.semanticTags,
+        triggeredBy: parsed.triggeredBy ?? input.row.triggeredBy,
+        risk: parsed.risk ?? input.row.risk,
+        confidence: parsed.confidence ?? input.row.confidence
+      }
     };
   }
 
