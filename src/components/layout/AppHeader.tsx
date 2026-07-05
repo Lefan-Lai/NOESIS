@@ -5,6 +5,7 @@ import {
   CircleHelp,
   FolderPlus,
   GitBranchPlus,
+  MessagesSquare,
   PlusCircle,
   Search,
   Settings2,
@@ -78,6 +79,14 @@ export function AppHeader() {
           aria-label="Help"
         >
           <CircleHelp size={21} />
+        </button>
+        <button
+          onClick={() => setActiveUtilityPanel("workspace")}
+          className="grid h-9 w-9 place-items-center rounded-md text-slate-700 hover:bg-slate-100 max-[900px]:hidden"
+          title="Thread Navigator"
+          aria-label="Thread Navigator"
+        >
+          <MessagesSquare size={21} />
         </button>
         <button
           onClick={() => setActiveUtilityPanel("documents")}

@@ -58,11 +58,6 @@ function ensurePreview(input: RevertInput): RevertPreview {
   }
 
   const currentActiveNode = activeNodeForInput(input);
-
-  if (currentActiveNode?.id === targetNode.id) {
-    throw new Error("Target timeline node is already active");
-  }
-
   const currentDocumentVersion = DocumentVersionService.getActiveDocumentVersion(
     input.state,
     input.projectId,
@@ -73,6 +68,14 @@ function ensurePreview(input: RevertInput): RevertPreview {
       input.state,
       targetNode.id
     ) ?? currentDocumentVersion;
+
+  if (
+    currentActiveNode?.id === targetNode.id &&
+    currentDocumentVersion?.id === targetDocumentVersion?.id
+  ) {
+    throw new Error("Target timeline node is already active");
+  }
+
   const inactiveNodes = TimelineService.getNodesAfterTargetOnCurrentActivePath(
     input.state,
     input.projectId,
@@ -187,9 +190,6 @@ function updateActiveDocumentVersion(input: {
     return input.state;
   }
 
-  const previous =
-    input.previousActiveDocumentVersionId &&
-    input.state.documentVersions[input.previousActiveDocumentVersionId];
   const target = input.state.documentVersions[input.newActiveDocumentVersionId];
 
   if (!target) {
@@ -200,6 +200,48 @@ function updateActiveDocumentVersion(input: {
   const conversation = input.conversationId
     ? input.state.mainConversations[input.conversationId]
     : undefined;
+  const documentVersions = Object.fromEntries(
+    Object.entries(input.state.documentVersions).map(([id, version]) => {
+      const inCurrentScope =
+        version.projectId === input.projectId &&
+        (!input.conversationId || version.conversationId === input.conversationId);
+
+      if (!inCurrentScope) {
+        return [id, version];
+      }
+
+      if (version.id === target.id) {
+        return [
+          id,
+          {
+            ...version,
+            status: "active" as const,
+            metadata: {
+              ...version.metadata,
+              activated_by_revert_at: input.now
+            }
+          }
+        ];
+      }
+
+      if (version.status === "active") {
+        return [
+          id,
+          {
+            ...version,
+            status: "superseded" as const,
+            metadata: {
+              ...version.metadata,
+              deactivated_by_revert_at: input.now,
+              replaced_by_active_document_version_id: target.id
+            }
+          }
+        ];
+      }
+
+      return [id, version];
+    })
+  ) as RevisionRepositoryState["documentVersions"];
 
   return {
     ...input.state,
@@ -222,27 +264,9 @@ function updateActiveDocumentVersion(input: {
               activeDocumentVersionId: target.id,
               updatedAt: input.now
             }
-          }
-        : input.state.mainConversations,
-    documentVersions: {
-      ...input.state.documentVersions,
-      ...(previous && previous.id !== target.id
-        ? {
-            [previous.id]: {
-              ...previous,
-              status: "superseded" as const
-            }
-          }
-        : {}),
-      [target.id]: {
-        ...target,
-        status: "active" as const,
-        metadata: {
-          ...target.metadata,
-          activated_by_revert_at: input.now
         }
-      }
-    }
+      : input.state.mainConversations,
+    documentVersions
   };
 }
 
@@ -351,6 +375,19 @@ export class RevertService {
       now: input.now,
       suffix: input.suffix
     });
+    const activePathNodeIds = TimelineService.getAncestors(
+      nextState,
+      preview.targetNode.id
+    ).map((node) => node.id);
+    const reactivateResult = TimelineService.markNodesActiveOnPath(
+      nextState,
+      activePathNodeIds,
+      input.now
+    );
+    nextState = {
+      ...nextState,
+      timelineNodes: reactivateResult.timelineNodes
+    };
 
     const pathResult = TimelineService.createContinuationPathFromNode({
       state: nextState,
@@ -362,7 +399,8 @@ export class RevertService {
       suffix: input.suffix,
       metadata: {
         created_by: "revert",
-        inactive_node_ids: preview.inactiveNodeIds
+        inactive_node_ids: preview.inactiveNodeIds,
+        reactivated_node_ids: reactivateResult.reactivatedNodeIds
       }
     });
     nextState = {
@@ -384,7 +422,8 @@ export class RevertService {
           path_id: pathResult.timelinePath.id,
           created_from_node_id: preview.targetNode.id,
           head_node_id: preview.targetNode.id,
-          inactive_node_ids: preview.inactiveNodeIds
+          inactive_node_ids: preview.inactiveNodeIds,
+          reactivated_node_ids: reactivateResult.reactivatedNodeIds
         }
       }
     );
@@ -425,6 +464,8 @@ export class RevertService {
       new_active_document_version_id: preview.newActiveDocumentVersionId,
       affected_node_ids: preview.affectedNodeIds,
       inactive_node_ids: preview.inactiveNodeIds,
+      active_path_node_ids: activePathNodeIds,
+      reactivated_node_ids: reactivateResult.reactivatedNodeIds,
       memory_scope: "timeline",
       memory_effect: "changes_active_path"
     };
@@ -532,7 +573,8 @@ export class RevertService {
           active_timeline_path_id: pathResult.timelinePath.id,
           active_timeline_node_id: preview.targetNode.id,
           previous_active_node_id: preview.currentActiveNode?.id,
-          inactive_node_ids: preview.inactiveNodeIds
+          inactive_node_ids: preview.inactiveNodeIds,
+          reactivated_node_ids: reactivateResult.reactivatedNodeIds
         }
       }
     );

@@ -537,6 +537,8 @@ export type AnswerAtlasState = {
     | "settings";
   revisionSuggestions: Record<string, string>;
   createProject: () => void;
+  renameProject: (projectId: string, name: string) => void;
+  deleteProject: (projectId: string) => boolean;
   switchProject: (projectId: string) => void;
   resetWorkspace: () => void;
   toggleNavigation: () => void;
@@ -622,6 +624,7 @@ export type AnswerAtlasState = {
   discardThread: (threadId: string) => void;
   deleteAnswer: (threadId: string) => void;
   revertToNode: (nodeId: string) => void;
+  returnToDocumentVersion: (versionId: string) => void;
   toggleContextDebugPanel: () => void;
   refreshContextPreview: () => void;
 };
@@ -756,19 +759,37 @@ function createLLMTrace(params: {
 function revisionStateFromStore(state: AnswerAtlasState): RevisionRepositoryState {
   return {
     projects: Object.fromEntries(
-      Object.values(state.projects).map((project) => [
-        project.id,
-        {
-          id: project.id,
-          name: project.name,
-          status: "active" as const,
-          createdAt: project.snapshot.documents
-            ? Object.values(project.snapshot.documents)[0]?.createdAt ??
-              project.updatedAt
-            : project.updatedAt,
-          updatedAt: project.updatedAt
-        }
-      ])
+      Object.values(state.projects).map((project) => {
+        const projectConversation = Object.values(state.mainConversations)
+          .filter(
+            (conversation) =>
+              conversation.projectId === project.id &&
+              conversation.status !== "deleted"
+          )
+          .sort(
+            (a, b) =>
+              new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+          )[0];
+
+        return [
+          project.id,
+          {
+            id: project.id,
+            name: project.name,
+            status: "active" as const,
+            activeConversationId: projectConversation?.id,
+            activeDocumentVersionId:
+              projectConversation?.activeDocumentVersionId,
+            activeTimelineNodeId: projectConversation?.activeTimelineNodeId,
+            activeTimelinePathId: projectConversation?.activeTimelinePathId,
+            createdAt: project.snapshot.documents
+              ? Object.values(project.snapshot.documents)[0]?.createdAt ??
+                project.updatedAt
+              : project.updatedAt,
+            updatedAt: project.updatedAt
+          }
+        ];
+      })
     ),
     mainConversations: state.mainConversations,
     revisionMessages: state.revisionMessages,
@@ -1037,6 +1058,109 @@ function appendVersionNodeAndCheckout(
       }
     },
     versionNodes: markActivePath(versionNodes, activePath)
+  };
+}
+
+function visibleVersionNodeIdForDocumentVersion(
+  state: AnswerAtlasState,
+  document: Document,
+  version: DocumentVersionModel,
+  fallbackNodeId: string
+) {
+  if (
+    version.createdFromTimelineNodeId &&
+    state.versionNodes[version.createdFromTimelineNodeId]
+  ) {
+    return version.createdFromTimelineNodeId;
+  }
+
+  if (
+    (version.versionNumber ?? 1) === 1 &&
+    document.rootVersionNodeId &&
+    state.versionNodes[document.rootVersionNodeId]
+  ) {
+    return document.rootVersionNodeId;
+  }
+
+  return version.createdFromTimelineNodeId ?? fallbackNodeId;
+}
+
+function syncVisibleDocumentVersion(
+  state: AnswerAtlasState,
+  version: DocumentVersionModel,
+  fallbackNodeId: string
+) {
+  const documentId = version.documentId ?? state.currentDocumentId;
+
+  if (!documentId) {
+    return state;
+  }
+
+  const document = state.documents[documentId];
+
+  if (!document) {
+    return state;
+  }
+
+  const activeVersionNodeId = visibleVersionNodeIdForDocumentVersion(
+    state,
+    document,
+    version,
+    fallbackNodeId
+  );
+  const syncedDocument: Document = {
+    ...document,
+    rawText: version.content,
+    title: version.title ?? document.title,
+    activeVersionNodeId,
+    updatedAt: new Date().toISOString()
+  };
+
+  if (!state.versionNodes[activeVersionNodeId]) {
+    const node: VersionNode = {
+      id: activeVersionNodeId,
+      documentId,
+      parentId: document.activeVersionNodeId ?? state.activeVersionNodeId,
+      childIds: [],
+      nodeType:
+        version.sourceType === "manual_edit" || version.sourceType === "merge"
+          ? "document_revised"
+          : "document_created",
+      label: version.versionNumber
+        ? `Document v${version.versionNumber}`
+        : "Document version",
+      isActivePath: true,
+      createdAt: version.createdAt
+    };
+
+    return appendVersionNodeAndCheckout(
+      {
+        ...state,
+        currentDocumentId: documentId,
+        documents: {
+          ...state.documents,
+          [documentId]: syncedDocument
+        }
+      },
+      node
+    );
+  }
+
+  const result = checkoutVersionNode(
+    syncedDocument,
+    state.versionNodes,
+    activeVersionNodeId
+  );
+
+  return {
+    ...state,
+    currentDocumentId: documentId,
+    activeVersionNodeId,
+    documents: {
+      ...state.documents,
+      [documentId]: result.document
+    },
+    versionNodes: result.versionNodes
   };
 }
 
@@ -1345,6 +1469,78 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
     });
 
     get().refreshContextPreview();
+  },
+
+  renameProject: (projectId, name) => {
+    const trimmedName = name.trim();
+
+    if (!trimmedName) {
+      return;
+    }
+
+    set((state) => {
+      const project = state.projects[projectId];
+
+      if (!project) {
+        return state;
+      }
+
+      return {
+        ...state,
+        projects: {
+          ...state.projects,
+          [projectId]: {
+            ...project,
+            name: trimmedName,
+            updatedAt: new Date().toISOString()
+          }
+        }
+      };
+    });
+  },
+
+  deleteProject: (projectId) => {
+    let deleted = false;
+
+    set((state) => {
+      const project = state.projects[projectId];
+      const remainingProjects = Object.values(state.projects).filter(
+        (item) => item.id !== projectId
+      );
+
+      if (!project || remainingProjects.length === 0) {
+        return state;
+      }
+
+      deleted = true;
+      const projects = Object.fromEntries(
+        remainingProjects.map((item) => [item.id, item])
+      ) as Records<Project>;
+
+      if (projectId !== state.currentProjectId) {
+        return {
+          ...state,
+          projects
+        };
+      }
+
+      const nextProject = remainingProjects[0];
+
+      return applyProjectSnapshot(
+        {
+          ...state,
+          currentProjectId: nextProject.id,
+          projects
+        },
+        nextProject.snapshot
+      );
+    });
+
+    if (deleted) {
+      get().refreshContextPreview();
+    }
+
+    return deleted;
   },
 
   switchProject: (projectId) => {
@@ -2123,27 +2319,62 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
       };
     }
 
-    set((current) => ({
-      ...current,
-      documents: current.currentDocumentId
-        && current.documents[current.currentDocumentId]
-        ? {
-            ...current.documents,
-            [current.currentDocumentId]: {
-              ...current.documents[current.currentDocumentId],
-              rawText: result.documentVersion.content,
-              updatedAt: result.documentVersion.createdAt
-            }
-          }
-        : current.documents,
-      documentVersions: result.state.documentVersions,
-      manualEditDrafts: result.state.manualEditDrafts,
-      textSelections: result.state.textSelections,
-      mainConversations: result.state.mainConversations,
-      eventLogs: result.state.eventLogs,
-      timelineNodes: result.state.timelineNodes,
-      timelineEdges: result.state.timelineEdges
-    }));
+    set((current) => {
+      const documentId = result.documentVersion.documentId ?? current.currentDocumentId;
+      const currentDocument = documentId ? current.documents[documentId] : undefined;
+      const documentUpdatedState: AnswerAtlasState = {
+        ...current,
+        currentDocumentId: documentId ?? current.currentDocumentId,
+        documents:
+          documentId && currentDocument
+            ? {
+                ...current.documents,
+                [documentId]: {
+                  ...currentDocument,
+                  rawText: result.documentVersion.content,
+                  updatedAt: result.documentVersion.createdAt
+                }
+              }
+            : current.documents
+      };
+      const versionNodeId =
+        result.documentVersion.createdFromTimelineNodeId ??
+        result.timelineNode?.id ??
+        `version-node-${result.documentVersion.id}`;
+      const parentVersionNodeId =
+        documentId && current.documents[documentId]
+          ? current.documents[documentId].activeVersionNodeId
+          : current.activeVersionNodeId;
+      const visibleTimelineState =
+        documentId && documentUpdatedState.documents[documentId]
+          ? appendVersionNodeAndCheckout(
+              documentUpdatedState,
+              {
+                id: versionNodeId,
+                documentId,
+                parentId: parentVersionNodeId ?? null,
+                childIds: [],
+                nodeType: "document_revised",
+                label: result.documentVersion.versionNumber
+                  ? `Edited document v${result.documentVersion.versionNumber}`
+                  : "Manual document edit",
+                isActivePath: true,
+                createdAt: result.documentVersion.createdAt
+              }
+            )
+          : documentUpdatedState;
+
+      return {
+        ...visibleTimelineState,
+        documentVersions: result.state.documentVersions,
+        manualEditDrafts: result.state.manualEditDrafts,
+        textSelections: result.state.textSelections,
+        mainConversations: result.state.mainConversations,
+        eventLogs: result.state.eventLogs,
+        timelineNodes: result.state.timelineNodes,
+        timelineEdges: result.state.timelineEdges
+      };
+    });
     void syncRevisionFoundation({
       projects: result.state.projects,
       mainConversations: result.state.mainConversations,
@@ -4725,30 +4956,67 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
 
   revertToNode: (nodeId) => {
     const stateBeforeRevert = get();
+    const targetNode = stateBeforeRevert.timelineNodes[nodeId];
+    const targetProjectId = targetNode?.projectId ?? stateBeforeRevert.currentProjectId;
+    const targetConversationId =
+      targetNode?.conversationId ?? DEFAULT_MAIN_SESSION_ID;
+    let revertedRevisionState: RevisionRepositoryState | undefined;
 
-    if (stateBeforeRevert.timelineNodes[nodeId]) {
-      get().executeRevisionAction("timeline.revert_to_node", {
+    if (targetNode) {
+      const actionResult = get().executeRevisionAction("timeline.revert_to_node", {
         target: {
           objectType: "timeline_node",
           objectId: nodeId,
-          projectId: stateBeforeRevert.currentProjectId,
-          conversationId: DEFAULT_MAIN_SESSION_ID,
-          status: stateBeforeRevert.timelineNodes[nodeId].status
+          projectId: targetProjectId,
+          conversationId: targetConversationId,
+          status: targetNode.status
         },
         confirmed: true,
         diffAccepted: true,
         suffix: makeIdSuffix()
       });
+      revertedRevisionState =
+        "state" in actionResult
+          ? (actionResult.state as RevisionRepositoryState | undefined)
+          : undefined;
     }
 
     set((state) => {
-      const documentId = state.currentDocumentId;
+      if (targetNode && !revertedRevisionState) {
+        return state;
+      }
+
+      const activeDocumentVersionId =
+        revertedRevisionState?.mainConversations[targetConversationId]
+          ?.activeDocumentVersionId ??
+        revertedRevisionState?.projects[targetProjectId]
+          ?.activeDocumentVersionId;
+      const activeDocumentVersion = activeDocumentVersionId
+        ? revertedRevisionState?.documentVersions[activeDocumentVersionId]
+        : undefined;
+      const documentId =
+        state.currentDocumentId ?? activeDocumentVersion?.documentId;
 
       if (!documentId) {
         return state;
       }
 
       const document = state.documents[documentId];
+      if (!document) {
+        return state;
+      }
+
+      if (activeDocumentVersion) {
+        return syncVisibleDocumentVersion(
+          {
+            ...state,
+            currentDocumentId: documentId
+          },
+          activeDocumentVersion,
+          nodeId
+        );
+      }
+
       const result = checkoutVersionNode(document, state.versionNodes, nodeId);
 
       return {
@@ -4763,6 +5031,58 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
     });
 
     get().refreshContextPreview();
+  },
+
+  returnToDocumentVersion: (versionId) => {
+    const stateBeforeReturn = get();
+    const targetVersion = stateBeforeReturn.documentVersions[versionId];
+
+    if (
+      !targetVersion ||
+      targetVersion.status === "deleted" ||
+      !targetVersion.createdFromTimelineNodeId
+    ) {
+      return;
+    }
+
+    const targetProjectId =
+      targetVersion.projectId ?? stateBeforeReturn.currentProjectId;
+    const targetConversationId =
+      targetVersion.conversationId ?? DEFAULT_MAIN_SESSION_ID;
+    const activeVersion = DocumentVersionService.getActiveDocumentVersion(
+      revisionStateFromStore(stateBeforeReturn),
+      targetProjectId,
+      targetConversationId
+    );
+    const activeTimelineNodeId = activeVersion?.createdFromTimelineNodeId;
+
+    if (
+      activeTimelineNodeId &&
+      stateBeforeReturn.mainConversations[targetConversationId]
+        ?.activeTimelineNodeId !== activeTimelineNodeId
+    ) {
+      set((state) => {
+        const conversation = state.mainConversations[targetConversationId];
+
+        if (!conversation) {
+          return state;
+        }
+
+        return {
+          ...state,
+          mainConversations: {
+            ...state.mainConversations,
+            [targetConversationId]: {
+              ...conversation,
+              activeTimelineNodeId,
+              updatedAt: new Date().toISOString()
+            }
+          }
+        };
+      });
+    }
+
+    get().revertToNode(targetVersion.createdFromTimelineNodeId);
   },
 
   toggleContextDebugPanel: () => {

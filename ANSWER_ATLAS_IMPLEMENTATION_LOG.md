@@ -1,5 +1,1135 @@
 # Answer Atlas 实现记录
 
+## 2026-07-05 - 修复 Thread Navigator 中 Project Rename 的交互 bug
+
+### 修改原因
+
+用户反馈点击 `Rename` 时会出现 bug。
+
+排查后发现 Project rename 旧逻辑有两个容易出错的点：
+
+1. 使用 `window.prompt` 做重命名。在嵌入式浏览器 / dev overlay 环境里，原生 prompt 的交互不够稳定，也不适合后续扩展。
+2. `RevisionExplorerPanel` 有一个 effect 监听整个 `projects` 对象。rename 会更新 `projects`，导致 effect 每次都把当前 detail selection 重置成 `main_window`，用户正在查看的版本、thread 或 selection 会被打断。
+
+### 修改文件
+
+```text
+src/components/thread/RevisionExplorerPanel.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### 新交互
+
+`Rename` 不再打开浏览器原生 prompt。
+
+现在点击 `Rename` 后，会在对应 project card 内直接显示：
+
+```text
+project name input
+Save
+Cancel
+```
+
+操作规则：
+
+1. `Enter` 保存。
+2. `Escape` 取消。
+3. `Save` 保存。
+4. `Cancel` 取消。
+5. 空名字不能保存。
+6. 如果名字没有变化，直接退出 rename 模式，不写入 store。
+
+### Selection 保留规则
+
+rename 后不再强制把右侧 detail panel 重置为 `Main Answer Window`。
+
+新的 effect 规则：
+
+1. 如果 selected project 还存在，保留当前 selected item。
+2. 只有 selected project 被删除或不存在时，才 fallback 到当前 project 的 `main_window`。
+3. 如果当前没有 selected item，才初始化为 selected project 的 `main_window`。
+
+这样用户在查看：
+
+```text
+Document Version
+Local Revision Thread
+Selection Group
+Main Conversation
+```
+
+时点击 rename，不会被强制跳回主窗口。
+
+### 验证
+
+```text
+pnpm typecheck
+pnpm test
+```
+
+结果：
+
+```text
+typecheck passed
+5 test files passed
+72 tests passed
+```
+
+## 2026-07-05 - 修复 Return to This Version 的 active version / timeline / memory 同步
+
+### 修改原因
+
+用户发现：在 Thread Navigator 中点击 `Return to This Version` 返回到 `Document v1` 后，右侧详情仍然显示：
+
+```text
+Status: Previous
+Stored status: superseded
+```
+
+这说明界面虽然触发了返回操作，但底层 revision workspace 的 active 指针没有完整同步。具体问题是：
+
+1. manual edit 生成 `DocumentVersion v2` 后，`activeDocumentVersionId` 更新了，但 `activeTimelineNodeId` 可能仍停留在 v1。
+2. `Return to This Version` 旧逻辑直接按 timeline node 调用 revert，没有先确认当前 active document version 和 active timeline node 是否一致。
+3. 底部旧版 `VersionTimeline` 与新的 revision timeline 使用的是两套 node id；v1 初始版本通常对应旧 timeline 的 `rootVersionNodeId`，不是 revision timeline 的 `createdFromTimelineNodeId`。
+4. 结果是 v1 / v2 的 active 标记、右侧 stored status、后续 LLM context 使用的 active document version 可能不同步。
+
+### 修改文件
+
+```text
+src/store/useAnswerAtlasStore.ts
+src/components/thread/RevisionExplorerPanel.tsx
+src/services/revision/DocumentVersionService.ts
+src/services/revision/RevertService.ts
+src/__tests__/revision-foundation.test.ts
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### 新增主逻辑
+
+Store 新增：
+
+```text
+returnToDocumentVersion(versionId)
+```
+
+这个方法现在是 Thread Navigator 中 `Return to This Version` 的正式入口。
+
+执行顺序：
+
+1. 根据 `versionId` 找到目标 `DocumentVersion`。
+2. 如果目标版本已经 deleted，或者没有 `createdFromTimelineNodeId`，直接停止。
+3. 找到当前 active document version。
+4. 如果当前 active document version 对应的 timeline node 与 conversation 的 `activeTimelineNodeId` 不一致，先修复 conversation 的 active timeline 指针。
+5. 调用 `revertToNode(targetVersion.createdFromTimelineNodeId)`。
+6. `revertToNode` 再根据服务层返回的 active document version 同步主文档内容、visible version node、active path 标记。
+
+### Active DocumentVersion 与 Timeline 指针规则
+
+`DocumentVersionService` 现在在创建或激活文档版本时同时写入：
+
+```text
+activeDocumentVersionId
+activeTimelineNodeId
+```
+
+影响范围：
+
+```text
+Project
+MainConversation
+```
+
+也就是说，生成初始回答、确认 manual edit 后：
+
+```text
+Project.activeDocumentVersionId = 新版本 id
+Project.activeTimelineNodeId = 新版本对应 timeline node id
+
+MainConversation.activeDocumentVersionId = 新版本 id
+MainConversation.activeTimelineNodeId = 新版本对应 timeline node id
+```
+
+### Return / Revert 后的 memory 规则
+
+返回某个版本后：
+
+```text
+目标 DocumentVersion.status = active
+原 active DocumentVersion.status = superseded
+MainConversation.activeDocumentVersionId = 目标版本 id
+MainConversation.activeTimelineNodeId = 目标版本 timeline node id
+Project.activeDocumentVersionId = 目标版本 id
+Project.activeTimelineNodeId = 目标版本 timeline node id
+```
+
+后续 LLM context builder 会以新的 active document version 为准。
+
+被 revert 掉的未来路径不会删除，而是：
+
+```text
+timeline node status = inactive
+memoryEffect = excluded_inactive
+```
+
+这表示：
+
+1. 历史仍然可以查看。
+2. 默认不会进入未来 LLM context。
+3. 用户之后仍可以再次 Return / Revert 到这些旧未来节点。
+
+### 从旧版本再回到新版本
+
+`RevertService` 增强了 active path 恢复逻辑：
+
+1. revert 到旧节点时，后续节点会被标为 inactive。
+2. 如果用户之后再次 revert / return 到那些 inactive 节点，服务会把目标路径上的节点重新激活。
+3. 重新激活的 document version 会恢复为 active，并重新进入后续 context。
+
+因此现在支持：
+
+```text
+v2 active
+→ return to v1
+→ v1 active, v2 inactive/superseded
+→ return to v2
+→ v2 active, v1 superseded
+```
+
+### UI 显示同步规则
+
+新增 `syncVisibleDocumentVersion`，用于把 revision document version 同步到旧 UI 的 visible version timeline。
+
+规则：
+
+1. 如果 `DocumentVersion.createdFromTimelineNodeId` 已存在于旧 `versionNodes`，直接使用它。
+2. 如果是 v1 初始版本，优先使用当前 document 的 `rootVersionNodeId`。
+3. 如果没有可见节点，则创建一个 legacy `VersionNode`，用于保证底部 timeline 至少能显示 active 状态。
+4. 主文档内容会替换为 active document version 的 `content`。
+5. `activeVersionNodeId` 会同步到可见 timeline node。
+
+### 修复的用户可见结果
+
+点击 `Return to This Version` 后，Thread Navigator 右侧应该立即显示：
+
+```text
+Document v1
+Status: Active
+Stored status: active
+```
+
+如果再点 v2：
+
+```text
+Document v2
+Status: Active
+Stored status: active
+```
+
+同时底部 Version Timeline 的 active 标记也会同步变化。
+
+### 测试
+
+新增/补强测试：
+
+```text
+manual edit confirmed 后，Project / MainConversation 的 activeTimelineNodeId 必须等于新 DocumentVersion.createdFromTimelineNodeId
+revert 到旧版本后，还能再次 revert 回之前的未来版本
+恢复未来版本后，ContextSnapshot 包含恢复后的 active document version，并排除 inactive path message
+```
+
+验证命令：
+
+```text
+pnpm typecheck
+pnpm test
+```
+
+结果：
+
+```text
+typecheck passed
+5 test files passed
+72 tests passed
+```
+
+## 2026-07-05 - Thread Navigator 标签、Thread 操作、Project 管理补全
+
+### 修改原因
+
+用户指出：
+
+1. Revision Outline 下方的 `Main Answer Threads` 标注不清楚，尤其在 0 threads 时像一个莫名其妙的重复分组。
+2. Thread 没有清楚的删除 / 丢弃标志，也不能直接从 Thread Navigator 操作。
+3. Project 没有重命名入口，也没有删除入口。
+
+### 修改文件
+
+```text
+src/components/thread/RevisionExplorerPanel.tsx
+src/store/useAnswerAtlasStore.ts
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### Thread Navigator 标签修改
+
+`Main Answer Threads` 分组改为：
+
+```text
+Local Revision Threads
+```
+
+说明语义改为：
+
+```text
+selection-based threads
+local revision threads created from selected text
+```
+
+空状态也改为明确说明：
+
+```text
+No local revision threads yet. Select text in an answer and open a local window to create one.
+```
+
+筛选按钮中原来的 `Main Answer Thread` 改为：
+
+```text
+From Main Answer
+```
+
+### Thread 操作补全
+
+Thread detail 中新增：
+
+```text
+Discard Thread
+Delete Thread
+```
+
+规则：
+
+1. `Discard Thread` 会保留 thread 历史，但默认排除在未来 LLM context 之外。
+2. `Delete Thread` 会把 thread 的 local answer / messages 标记删除或脱敏，未来永不进入 LLM context。
+3. Timeline 历史保留。
+4. 对非当前 project 的 thread 操作时，会先切换到对应 project，再执行操作，避免误操作当前 project。
+5. 操作前会弹出确认框，并说明作用范围。
+
+### Project 管理补全
+
+Store 新增：
+
+```text
+renameProject(projectId, name)
+deleteProject(projectId)
+```
+
+Thread Navigator 左侧 project card 新增：
+
+```text
+Rename
+Delete
+```
+
+删除规则：
+
+1. 不允许删除最后一个 project。
+2. 删除非当前 project：移除该 project card 和保存的 project snapshot。
+3. 删除当前 project：切换到另一个 project，并移除被删 project 的当前加载 workspace 数据。
+4. 删除 project 不删除磁盘文件。
+5. 删除前会弹出确认框，明确说明删除范围。
+
+### Memory 影响
+
+Thread delete / discard 使用既有的 revision action：
+
+```text
+object.discard
+object.delete
+```
+
+所以它们会继续遵守已有 memory 规则：
+
+```text
+discarded -> excluded_by_default
+deleted -> never_include
+```
+
+Project rename 只影响 UI label，不影响 LLM context。
+
+### 验证结果
+
+```text
+pnpm typecheck
+pnpm test
+```
+
+`pnpm test` 普通 sandbox 下仍因 Windows `spawn EPERM` 被拦截；提升权限后通过：5 个 test files，72 个 tests。
+
+## 2026-07-05 - Thread Navigator 问答可视性与 Manual Edit Timeline 节点修复
+
+### 修改原因
+
+用户指出两个问题：
+
+1. Thread Navigator 详情中的 question 和 answer 使用同一种白色框，视觉上很难区分。
+2. 在主回答里编辑原本文字并确认保存后，底部 Version Timeline 没有出现新的可见节点。
+
+### 修改文件
+
+```text
+src/components/thread/RevisionExplorerPanel.tsx
+src/store/useAnswerAtlasStore.ts
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### UI 修改
+
+Thread Navigator 的 thread detail 现在使用不同样式显示最新问答：
+
+```text
+Latest Question:
+  蓝色 user card
+  User 图标
+
+Latest Answer:
+  紫色 assistant card
+  Bot 图标
+```
+
+这样用户在查看 thread 时，可以更快地区分“用户问了什么”和“模型回答了什么”。
+
+### Timeline 修改
+
+底层持久化服务在 manual edit 确认时已经会创建：
+
+```text
+document.version.created
+document.manual_edited
+document.version.activated
+```
+
+以及对应的 persistent timeline nodes。
+
+本次修复的是旧版可见底部 `VersionTimeline`：
+
+1. `confirmManualEditDraft` 成功后，会创建一个兼容旧 timeline 的 `VersionNode`。
+2. 该节点的 id 使用 persistent manual edit timeline node id。
+3. 该节点类型为 `document_revised`。
+4. label 显示为 `Edited document vX`。
+5. 该节点会加入当前 document 的 version node path，并被设置为 active。
+
+这样底部 Version Timeline 能看到 manual edit 产生的新节点，同时点击该节点 revert 时仍然能走真实 persistent timeline。
+
+### Memory 影响
+
+manual edit 确认后真正进入 future LLM context 的仍然是新的 `DocumentVersion`，不是旧版 UI timeline node。旧版 `VersionNode` 只负责前端可视化兼容。
+
+### 验证结果
+
+```text
+pnpm typecheck
+pnpm test
+```
+
+`pnpm test` 普通 sandbox 下仍因 Windows `spawn EPERM` 被拦截；提升权限后通过：5 个 test files，72 个 tests。
+
+## 2026-07-05 - Revision Explorer Active Version 显示与 Return 修复
+
+### 修改原因
+
+用户在界面中发现：已经 revert 到 v1 后，Document Versions 列表仍然显示 v2 为 Active，v1 显示 Previous；同时用户无法清楚地回到之前未 revert 的 v2。这个问题说明 UI 的 active 标志仍主要依赖 `DocumentVersion.status`，而不是当前 conversation 的 `activeDocumentVersionId`；并且前端 revert 调用里 conversationId 仍有写死默认值的风险。
+
+### 修改文件
+
+```text
+src/components/thread/RevisionExplorerPanel.tsx
+src/store/useAnswerAtlasStore.ts
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### 修改规则
+
+1. Revision Explorer 中的版本 Active 判断优先使用当前 main conversation 的 `activeDocumentVersionId`。
+2. 如果 `activeDocumentVersionId === version.id`，该版本显示为 `Active`。
+3. 如果版本对应的 timeline node 已被 revert 标记为 `inactive`，显示为 `Off active path`，而不是误显示为 Active。
+4. 非 active、非 deleted、且有 `createdFromTimelineNodeId` 的版本都可以执行 `Return to This Version`。
+5. `Return to This Version` 用于从当前 active path 返回到旧版本或之前被 revert 掉的未来版本。
+6. `revertToNode` 不再写死 `DEFAULT_MAIN_SESSION_ID`，而是从目标 timeline node 读取 `projectId` 和 `conversationId`。
+7. 如果持久化 revert action 没有成功返回新 revision state，前端不会偷偷执行旧的 checkout，避免 UI 假装已经回退。
+8. ProjectView 会订阅 `timelineNodes`，revert 后 badge 会重新计算。
+
+### Memory 影响
+
+这次修改没有改变 context builder 的底层 included/excluded 规则，但修正了 UI 与底层 active pointer 的对应关系。之后用户看到的 Active / Off active path 应该和 LLM context 中使用的 active document version 保持一致。
+
+### 验证结果
+
+```text
+pnpm typecheck
+pnpm test
+```
+
+`pnpm test` 在普通 sandbox 下仍因 Windows `spawn EPERM` 被拦截；提升权限后通过：5 个 test files，72 个 tests。
+
+## 2026-07-05 - Revert Active Path 与 Memory 状态修复
+
+### 修改原因
+
+用户指出：revert 之后，active 的标志必须跟着变化；已经被 revert 变成 inactive 的“未来节点”之后仍然应该可以再次 revert 回去；同时所有会影响 LLM context / memory 的地方也要根据新的 active path 更新。
+
+### 修改文件
+
+```text
+src/services/revision/TimelineService.ts
+src/services/revision/RevertService.ts
+src/store/useAnswerAtlasStore.ts
+src/components/thread/RevisionExplorerPanel.tsx
+src/__tests__/revision-foundation.test.ts
+```
+
+### 核心规则
+
+1. Revert 不删除历史，只改变 active path / inactive path / active document version。
+2. 当 timeline node 因 revert 被标记 inactive 时，会保存它之前的 status 和 memoryEffect。
+3. 当用户之后又 revert 回一个之前 inactive 的节点时，该节点所在 active path 会重新激活。
+4. 重新激活后，timeline node 的 memoryEffect 会从 `excluded_inactive` 恢复为原先的 memoryEffect；如果没有旧值，则 document version node 会恢复为 `updates_document_memory`。
+5. 同一个 project + conversation 范围内，只有当前目标 DocumentVersion 会是 `active`；其他 active DocumentVersion 会变成 `superseded`。
+6. ContextSnapshot 之后读取的 active document version 会跟随 revert 后的 `activeDocumentVersionId`，不会继续使用被 inactive path 排除的版本。
+7. Revision Explorer 的 `Revert to This Version` 只使用真实的 `createdFromTimelineNodeId`，不再把 event id 当作 timeline node id。
+8. 前端 store 在 revert 后会用持久化 DocumentVersion 同步主文档内容、标题和 active version node，避免 UI active 标志、document 内容、context 三者不一致。
+
+### 验证结果
+
+```text
+pnpm typecheck
+pnpm test
+```
+
+`pnpm test` 在普通 sandbox 下因为 Windows `spawn EPERM` 无法加载 Vitest config；提升权限后通过：5 个 test files，72 个 tests。
+
+## 2026-07-05 - Revision Explorer 三栏重构
+
+### 修改原因
+
+用户指出：之前的 Project Thread Explorer 记录过于杂乱、重复，而且“类似文件夹结构”的意思不是显示文件夹图标，而是要有清楚的层级、简略信息、点击后看详情、能查看旧版本并回到旧版本。
+
+### 修改文件
+
+```text
+src/components/thread/RevisionExplorerPanel.tsx
+src/components/layout/UtilityPanel.tsx
+```
+
+说明：没有删除旧 explorer 文件。workspace 面板现在切换到新的 `RevisionExplorerPanel`。
+
+### 新 UI 结构
+
+新的 Revision Explorer 是三栏：
+
+```text
+左栏：Projects
+中栏：Revision Outline
+右栏：Selected Item Detail
+```
+
+左栏用于跨 project 快速切换。
+
+中栏只显示简略结构：
+
+```text
+Main Answer Window
+  Main Conversation
+  Document Versions
+    v3 active
+    v2 previous
+    v1 previous
+  Main Answer Threads
+    Selection
+      Main Answer Thread
+        Follow-up Thread
+```
+
+右栏显示被选中项的详情。
+
+### 去除文件夹图标
+
+本次不再使用文件夹图标表达层级。层级只通过：
+
+```text
+缩进
+展开箭头
+简短标题
+简短 meta
+状态小标
+```
+
+来表示。
+
+### 简略信息规则
+
+outline 中每一行只显示：
+
+```text
+title
+meta
+status badge（如有）
+```
+
+不再把 last question / last answer / memory / related objects 全部塞在节点里。
+
+### 详情面板规则
+
+点击不同节点后，右侧详情面板显示不同内容：
+
+```text
+Main Answer Window:
+  window title
+  document title
+  active version
+  updated time
+  active document preview
+
+Main Conversation:
+  message count
+  last user question
+  last assistant answer
+  memory explanation
+
+Document Versions:
+  version list
+  source type
+  created time
+  active / previous status
+
+Document Version:
+  status
+  source
+  created time
+  version preview
+  Revert to This Version
+
+Selection:
+  selected source text
+  threads from this selection
+
+Thread:
+  source text
+  last question
+  last answer
+  status
+  memory rule
+  related counts
+  Open Thread
+```
+
+### 版本展示与回退
+
+`Document Versions` 现在是真实版本列表：
+
+```text
+v3 active
+v2 previous
+v1 previous
+```
+
+点击版本只会预览，不改变 active document。
+
+回退必须点击：
+
+```text
+Revert to This Version
+```
+
+按钮逻辑：
+
+```text
+如果 version 是 active -> 禁用
+如果 version 没有 timeline node -> 禁用
+如果 version 可回退 -> 弹出 confirm
+确认后 -> revertToNode(version.createdFromTimelineNodeId ?? version.sourceEventId)
+```
+
+跨 project 回退时：
+
+```text
+switchProject(projectId)
+setTimeout(revertToNode)
+```
+
+### 标签筛选规则
+
+标签只放在顶部作为全局筛选：
+
+```text
+All
+Main Answer Thread
+Follow-up Thread
+Has Notes
+Has Branch
+Has Merge
+Has Comparison
+Active
+Discarded
+Deleted
+```
+
+节点内部不再堆标签。
+
+### Memory / Context 影响
+
+Revision Explorer 本身是读取视图：
+
+```text
+浏览 project / outline:
+  不创建 message
+  不创建 DocumentVersion
+  不创建 EventLog
+  不创建 ContextSnapshot
+  不改变 LLM memory
+
+点击版本:
+  只预览
+  不改变 active version
+
+点击 Revert to This Version:
+  才会走 revertToNode
+  才会改变 active path / active document version
+
+点击 Open Thread:
+  先走 related_thread.open
+  再恢复 side thread UI
+  不把 local thread 内容加入 main context
+```
+
+### 验证记录
+
+```text
+pnpm typecheck -> passed
+pnpm test -> 5 test files passed, 72 tests passed
+```
+
+说明：`pnpm test` 在 sandbox 内仍然遇到 Windows `spawn EPERM`，提权重跑后通过。
+
+服务检查：
+
+```text
+http://127.0.0.1:3000/documents/doc-ai-education -> 200
+```
+
+## 2026-07-05 - Project Thread Explorer 补充 Main Answer Window 根节点
+
+### 修改原因
+
+用户指出：Project Thread Explorer 只展示了 thread，却少展示了 Main Answer Window 里的主会话和主文档版本。这样会让 `Main Answer Thread` 看起来像凭空出现，而不是从主回答窗口分叉出来。
+
+### 修改文件
+
+```text
+src/components/thread/ProjectThreadExplorerPanel.tsx
+```
+
+### 新结构
+
+Project Thread Explorer 现在按这个层级展示：
+
+```text
+Project
+└─ Main Answer Window
+   ├─ Main Conversation
+   ├─ Document Versions
+   └─ Main Answer Threads
+      └─ Main Answer Thread
+         └─ Follow-up Threads
+            └─ Follow-up Thread
+```
+
+### Main Answer Window 记录内容
+
+`Main Answer Window` 节点会显示：
+
+```text
+window title
+document title
+active document version
+updated time
+```
+
+### Main Conversation 记录内容
+
+`Main Conversation` 子文件夹会显示：
+
+```text
+main conversation title
+main message count
+last user question
+last assistant answer
+```
+
+如果 UI conversation messages 不存在，会尝试从 persistent `revisionMessages` 中恢复 main thread messages。
+
+### Document Versions 记录内容
+
+`Document Versions` 子文件夹会显示：
+
+```text
+active DocumentVersion
+document version count
+active document preview
+```
+
+规则说明：
+
+```text
+Main context 使用 active DocumentVersion。
+旧版本仍可追溯，但默认不是 active document memory。
+```
+
+### 空 thread 项目的显示规则
+
+即使 project 还没有任何 local / follow-up thread，也会显示：
+
+```text
+Main Answer Window
+Main Conversation
+Document Versions
+Main Answer Threads
+```
+
+`Main Answer Threads` 内部会提示没有匹配的 thread，而不是让整个 explorer 变成空白。
+
+### Memory / Context 影响
+
+本次修改只改变可视化层级，不改变 memory。
+
+```text
+Main Answer Window:
+  读取现有 main conversation / document version
+  不创建 message
+  不创建 DocumentVersion
+  不创建 EventLog
+  不改变 ContextSnapshot
+
+Main Answer Threads:
+  仍然只是 local / follow-up thread 的导航入口
+  打开 thread 不会把 local 内容加入 main context
+```
+
+### 验证记录
+
+```text
+pnpm typecheck -> passed
+pnpm test -> 5 test files passed, 72 tests passed
+```
+
+说明：`pnpm test` 在 sandbox 内仍然遇到 Windows `spawn EPERM`，提权重跑后通过。
+
+服务检查：
+
+```text
+http://127.0.0.1:3000/documents/doc-ai-education -> 200
+```
+
+## 2026-07-05 - Project Thread Explorer / 文件夹式 Thread 导航
+
+### 修改原因
+
+用户反馈：原 Thread Navigator 的标签含义不清楚，不知道标签指的是 thread 类型、状态、memory 还是来源；同时需要一个能在不同 project 之间快速回到之前 thread 的导航栏。
+
+本次修改将右侧 workspace 面板从普通 thread card list 升级为 `Project Thread Explorer`。
+
+### 修改文件
+
+```text
+src/components/thread/ProjectThreadExplorerPanel.tsx
+src/components/layout/UtilityPanel.tsx
+```
+
+说明：没有删除旧 `ThreadNavigatorPanel.tsx`，只是将 workspace 面板切换为新的 explorer 组件。
+
+### 新命名规则
+
+```text
+Main Answer Thread
+  从主回答选中文字后创建的局部 thread
+
+Follow-up Thread
+  从 local / follow-up answer 里继续选中文字后创建的嵌套 thread
+```
+
+不再在 UI 上使用 `Main Local Thread` / `Nested Local Thread` 这种偏内部实现的叫法。
+
+### 新 UI 结构
+
+现在 workspace 面板是两栏：
+
+```text
+左栏：Projects
+  - project name
+  - total threads
+  - main answer thread count
+  - follow-up thread count
+  - latest activity
+
+右栏：Project Thread Explorer
+  - selected project summary
+  - search
+  - clickable filter labels
+  - collapsible folder tree
+```
+
+右侧 thread 树是文件夹式结构：
+
+```text
+Main Answer Threads
+  └─ Main Answer Thread
+      ├─ Source / Status / Memory / Last question / Last answer
+      └─ Follow-up Threads
+          └─ Follow-up Thread
+```
+
+每一层都可以展开 / 收缩。
+
+### 标签语义
+
+标签现在分为两类：
+
+```text
+Thread type:
+  Main Answer Thread
+  Follow-up Thread
+
+State / relation filters:
+  Active
+  Merged
+  Branched
+  Noted
+  Discarded
+  Deleted
+  Has Notes
+  Has Branch
+  Has Merge
+  Has Comparison
+```
+
+点击标签会切换过滤器，只显示对应类型或对应关系的 thread。
+
+如果过滤结果是 Follow-up Thread，系统会保留 parent thread 作为路径提示，并显示：
+
+```text
+Parent path shown for orientation.
+```
+
+这样用户既能只看目标类型，又不会丢失这个 follow-up 从哪里来的结构关系。
+
+### Thread 节点详情
+
+每个 thread 展开后显示：
+
+```text
+Source:
+  Source: Main answer selection
+  Source: Follow-up answer fragment
+
+Source version:
+  Source version: vX
+
+Memory:
+  Memory: local only
+  Memory: excluded by default
+  Memory: never include
+  Memory: merged through DocumentVersion
+
+UI:
+  UI: available
+  UI: hidden
+
+Conversation:
+  Last question
+  Last answer
+
+Related:
+  messages
+  notes
+  branches
+  merges
+  comparisons
+```
+
+### 跨 Project 打开 thread 的逻辑
+
+用户可以先在左栏选择任意 project 查看其 thread。
+
+如果点击其他 project 中的 thread：
+
+```text
+setSelectedProjectId(projectId)
+switchProject(projectId)
+executeRevisionAction("related_thread.open", target)
+openThread(thread.id)
+```
+
+这样用户不需要先手动切 project，再重新找 thread。
+
+### Memory / Context 影响
+
+Project Thread Explorer 是导航视图，不改变 memory。
+
+```text
+浏览 project:
+  不改变 LLM context
+  不创建事件
+  不创建 message
+  不创建 DocumentVersion
+
+打开 thread:
+  先走 related_thread.open action
+  memory_effect = none
+  只恢复 selectedThreadId / side thread UI
+  不把 thread 内容加入 main conversation context
+
+Deleted thread:
+  不允许打开
+  source text redacted
+  不展示删除正文
+  永远不进入未来 LLM context
+```
+
+### 验证记录
+
+```text
+pnpm typecheck -> passed
+pnpm test -> 5 test files passed, 72 tests passed
+```
+
+说明：`pnpm test` 在 sandbox 内仍然遇到 Windows `spawn EPERM`，提权重跑后通过。
+
+服务检查：
+
+```text
+http://127.0.0.1:3000/documents/doc-ai-education -> 200
+```
+
+## 2026-07-05 - Thread Navigator / Thread Map 入口
+
+### 修改原因
+
+用户反馈：点击或创建 thread 之后，如果窗口被关闭、最小化、切换，用户很难再知道之前有哪些 thread，也很难重新找到过去的 local conversation。
+
+本次修改不是重做 UI，而是在现有 workspace 右侧工具面板中增加一个可视化 thread navigator，用于把当前 project 下的 local thread / nested local thread 显示成可恢复的结构。
+
+### 修改文件
+
+```text
+src/components/thread/ThreadNavigatorPanel.tsx
+src/components/layout/UtilityPanel.tsx
+src/components/layout/AppHeader.tsx
+```
+
+### 新增功能
+
+新增 `ThreadNavigatorPanel`，显示当前 project 的 thread 概览：
+
+```text
+Thread Navigator
+├─ Total / Active / Hidden / Discarded / Deleted 统计
+├─ 搜索框
+├─ All / Active / Minimized / Discarded / Deleted 过滤器
+└─ Thread cards
+   ├─ source selected text preview
+   ├─ local / nested local 类型
+   ├─ status
+   ├─ source document version
+   ├─ last local question
+   ├─ last local assistant answer
+   ├─ message count
+   ├─ related note count
+   ├─ related branch count
+   ├─ related merge count
+   └─ related comparison count
+```
+
+如果 thread 有 `parentThreadId`，会作为 nested thread 缩进显示在 parent thread 下方。这样用户可以看到：
+
+```text
+main selected text
+  -> local thread
+       -> nested local thread
+```
+
+### 顶部入口
+
+在 `AppHeader` 增加 `Thread Navigator` 按钮。用户点击后会打开右侧 Thread Navigator 面板。
+
+### 打开 thread 的逻辑
+
+每个 thread card 右上角有 Open 按钮。点击后先走统一 action layer：
+
+```text
+executeRevisionAction("related_thread.open", target)
+```
+
+如果 action 没有被 guard 阻止，并且 thread 不是 deleted，则继续调用：
+
+```text
+openThread(thread.id)
+```
+
+这只恢复 UI 中当前选中的 side thread，不会改变 document memory。
+
+### Memory / Context 影响
+
+Thread Navigator 本身不改变任何 memory。
+
+```text
+Open thread:
+  memory_effect = none
+  不创建 message
+  不创建 DocumentVersion
+  不创建 Annotation
+  不创建 MergeRecord
+  不进入 main conversation context
+
+Search / filter:
+  纯 UI 查询
+  不改变数据库
+  不改变 context snapshot
+
+Deleted thread:
+  不允许打开
+  source text 显示为 redacted
+  不显示已删除正文
+  不会进入未来 LLM context
+```
+
+### Related counts 计算规则
+
+每个 thread 会根据这些 id 聚合相关对象：
+
+```text
+thread.id
+thread.revisionLocalThreadId
+thread.sourceSelectionId
+thread.sourceLocalSelectionId
+thread.relatedBranchId
+```
+
+然后统计 Annotation / RevisionBranch / MergeRecord / ComparisonGraph 的相关数量。deleted 对象不计入普通 related count。
+
+### 验证记录
+
+```text
+pnpm typecheck -> passed
+pnpm test -> 5 test files passed, 72 tests passed
+```
+
+说明：`pnpm test` 在 sandbox 内仍然遇到 Windows `spawn EPERM`，按既有方式提权重跑后通过。
+
+服务检查：
+
+```text
+http://127.0.0.1:3000/documents/doc-ai-education -> 200
+```
+
 ## 2026-07-04：Context Review、LLM 调用记录、本地存储
 
 ### 本次修改目标

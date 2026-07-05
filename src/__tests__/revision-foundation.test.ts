@@ -1646,6 +1646,13 @@ describe("revision foundation services", () => {
         "conversation-1"
       )?.id
     ).toBe(confirmed.documentVersion.id);
+    expect(
+      confirmed.state.mainConversations["conversation-1"]
+        .activeTimelineNodeId
+    ).toBe(confirmed.documentVersion.createdFromTimelineNodeId);
+    expect(
+      confirmed.state.projects["project-1"].activeTimelineNodeId
+    ).toBe(confirmed.documentVersion.createdFromTimelineNodeId);
     expect(Object.values(confirmed.state.eventLogs)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -2851,10 +2858,11 @@ describe("revision foundation services", () => {
       now: "2026-07-04T02:10:01.000Z",
       suffix: "phase7-revert-first"
     });
+    const firstDocumentVersion = firstCompleted.documentVersion;
     const firstDocumentNodeId =
-      firstCompleted.documentVersion?.createdFromTimelineNodeId;
+      firstDocumentVersion?.createdFromTimelineNodeId;
 
-    if (!firstDocumentNodeId) {
+    if (!firstDocumentVersion || !firstDocumentNodeId) {
       throw new Error("Expected first document timeline node");
     }
 
@@ -2887,6 +2895,14 @@ describe("revision foundation services", () => {
       now: "2026-07-04T02:10:03.000Z",
       suffix: "phase7-revert-second"
     });
+    const secondDocumentVersion = secondCompleted.documentVersion;
+    const secondDocumentNodeId =
+      secondDocumentVersion?.createdFromTimelineNodeId;
+
+    if (!secondDocumentVersion || !secondDocumentNodeId) {
+      throw new Error("Expected second document timeline node");
+    }
+
     const stateBeforePreview = JSON.stringify(secondCompleted.state);
     const preview = RevertService.previewRevert({
       state: secondCompleted.state,
@@ -3002,6 +3018,72 @@ describe("revision foundation services", () => {
           sourceId: secondStarted.timelineNodes[0].id,
           reason: "because inactive_path_excluded"
         })
+      ])
+    );
+
+    const revertedBackToFuture = RevertService.confirmRevert({
+      state: followupStarted.state,
+      projectId: "project-1",
+      conversationId: "conversation-1",
+      targetNodeId: secondDocumentNodeId,
+      now: "2026-07-04T02:10:07.000Z",
+      suffix: "phase7-revert-back-to-future"
+    });
+
+    expect(
+      revertedBackToFuture.state.timelineNodes[secondDocumentNodeId]
+    ).toMatchObject({
+      status: "active",
+      memoryEffect: "updates_document_memory"
+    });
+    expect(
+      revertedBackToFuture.state.mainConversations["conversation-1"]
+        .activeTimelineNodeId
+    ).toBe(secondDocumentNodeId);
+    expect(
+      revertedBackToFuture.state.mainConversations["conversation-1"]
+        .activeDocumentVersionId
+    ).toBe(secondCompleted.documentVersion?.id);
+    expect(
+      revertedBackToFuture.state.documentVersions[
+        secondDocumentVersion.id
+      ].status
+    ).toBe("active");
+    expect(
+      revertedBackToFuture.state.documentVersions[
+        firstDocumentVersion.id
+      ].status
+    ).toBe("superseded");
+
+    const futureActiveDocument = DocumentVersionService.getActiveDocumentVersion(
+      revertedBackToFuture.state,
+      "project-1",
+      "conversation-1"
+    );
+    const futureFollowup = MainConversationRevisionService.createStartedMainSend({
+      state: revertedBackToFuture.state,
+      projectId: "project-1",
+      conversationId: "conversation-1",
+      prompt: "Continue from restored future",
+      model: "gpt-5.5",
+      documentId: "doc-1",
+      activeDocumentVersion: futureActiveDocument,
+      recentMessages: Object.values(revertedBackToFuture.state.revisionMessages),
+      now: "2026-07-04T02:10:08.000Z",
+      suffix: "phase7-revert-restored-future-followup"
+    });
+
+    expect(futureFollowup.contextSnapshot.includedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceId: secondDocumentVersion.id,
+          reason: expect.stringContaining("active_document_version")
+        })
+      ])
+    );
+    expect(futureFollowup.contextSnapshot.includedItems).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sourceId: followupStarted.userMessage.id })
       ])
     );
   });

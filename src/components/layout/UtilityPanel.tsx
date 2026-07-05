@@ -1,6 +1,7 @@
 "use client";
 
 import { X } from "lucide-react";
+import { RevisionExplorerPanel } from "@/components/thread/RevisionExplorerPanel";
 import { useAnswerAtlasStore } from "@/store/useAnswerAtlasStore";
 
 const panelCopy: Record<string, { title: string; body: string[] }> = {
@@ -35,10 +36,10 @@ const panelCopy: Record<string, { title: string; body: string[] }> = {
     ]
   },
   workspace: {
-    title: "Workspace",
+    title: "Thread Navigator",
     body: [
-      "Workspace manages the current project surface: document, side threads, comparison, context, and timeline.",
-      "Different projects are isolated from each other."
+      "Find and restore local or nested side threads in the current project.",
+      "Thread memory stays scoped to its project, selection, and local workspace rules."
     ]
   },
   documents: {
@@ -91,9 +92,16 @@ export function UtilityPanel() {
   }
 
   const copy = panelCopy[activeUtilityPanel];
+  const isWorkspacePanel = activeUtilityPanel === "workspace";
 
   return (
-    <aside className="fixed right-4 top-20 z-40 w-[360px] rounded-lg border border-line bg-white shadow-panel">
+    <aside
+      className={`fixed right-4 top-20 z-40 rounded-lg border border-line bg-white shadow-panel ${
+        isWorkspacePanel
+          ? "w-[940px] max-w-[calc(100vw-32px)]"
+          : "w-[360px] max-w-[calc(100vw-32px)]"
+      }`}
+    >
       <div className="flex h-12 items-center justify-between border-b border-line px-4">
         <h2 className="font-bold text-ink">{copy.title}</h2>
         <button
@@ -105,11 +113,15 @@ export function UtilityPanel() {
           <X size={17} />
         </button>
       </div>
-      <div className="space-y-3 p-4 text-sm leading-6 text-slate-700">
-        {copy.body.map((item) => (
-          <p key={item}>{item}</p>
-        ))}
-      </div>
+      {isWorkspacePanel ? (
+        <RevisionExplorerPanel />
+      ) : (
+        <div className="space-y-3 p-4 text-sm leading-6 text-slate-700">
+          {copy.body.map((item) => (
+            <p key={item}>{item}</p>
+          ))}
+        </div>
+      )}
     </aside>
   );
 }

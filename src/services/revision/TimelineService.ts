@@ -85,6 +85,37 @@ function projectionTime(projection: TimelineNodeProjectionModel) {
   return new Date(projection.createdAt).getTime();
 }
 
+function restoredTimelineNodeStatus(
+  node: RevisionTimelineNode
+): RevisionTimelineNode["status"] {
+  const previousStatus = node.payload?.previous_status_before_inactive;
+
+  return previousStatus === "active_marker" ? "active_marker" : "active";
+}
+
+function restoredTimelineNodeMemoryEffect(
+  node: RevisionTimelineNode
+): RevisionTimelineNode["memoryEffect"] {
+  const previousMemoryEffect = node.payload?.previous_memory_effect_before_inactive;
+
+  if (
+    typeof previousMemoryEffect === "string" &&
+    previousMemoryEffect !== "excluded_inactive"
+  ) {
+    return previousMemoryEffect as RevisionTimelineNode["memoryEffect"];
+  }
+
+  if (node.targetObjectType === "document_version") {
+    return "updates_document_memory";
+  }
+
+  if (node.memoryScope === "timeline") {
+    return "changes_active_path";
+  }
+
+  return "adds_to_context";
+}
+
 function projectNodeProjections(
   state: RevisionRepositoryState,
   projectId: string,
@@ -447,12 +478,55 @@ export class TimelineService {
         memoryEffect: "excluded_inactive",
         payload: {
           ...node.payload,
+          previous_status_before_inactive:
+            node.payload?.previous_status_before_inactive ?? node.status,
+          previous_memory_effect_before_inactive:
+            node.payload?.previous_memory_effect_before_inactive ??
+            node.memoryEffect,
           inactive_reason: "active_path_reverted"
         }
       };
     }
 
     return { timelineNodes };
+  }
+
+  static markNodesActiveOnPath(
+    state: Pick<RevisionRepositoryState, "timelineNodes">,
+    nodeIds: string[],
+    now = new Date().toISOString()
+  ) {
+    const timelineNodes = { ...state.timelineNodes };
+    const reactivatedNodeIds: string[] = [];
+
+    for (const nodeId of nodeIds) {
+      const node = timelineNodes[nodeId];
+      if (!node || node.status === "deleted" || node.status === "discarded") {
+        continue;
+      }
+
+      if (node.status !== "inactive" && node.memoryEffect !== "excluded_inactive") {
+        continue;
+      }
+
+      const restoredStatus = restoredTimelineNodeStatus(node);
+      const restoredMemoryEffect = restoredTimelineNodeMemoryEffect(node);
+      reactivatedNodeIds.push(node.id);
+      timelineNodes[nodeId] = {
+        ...node,
+        status: restoredStatus,
+        memoryEffect: restoredMemoryEffect,
+        payload: {
+          ...node.payload,
+          reactivated_reason: "active_path_reverted_back",
+          reactivated_at: now,
+          restored_status: restoredStatus,
+          restored_memory_effect: restoredMemoryEffect
+        }
+      };
+    }
+
+    return { timelineNodes, reactivatedNodeIds };
   }
 
   static createContinuationPathFromNode(input: {

@@ -122,6 +122,7 @@ function projectWithActiveVersion(params: {
   projectId: string;
   projectName?: string;
   activeDocumentVersionId: string;
+  activeTimelineNodeId?: string;
   now: string;
 }) {
   const current = params.state.projects[params.projectId];
@@ -135,6 +136,9 @@ function projectWithActiveVersion(params: {
       updatedAt: params.now
     }),
     activeDocumentVersionId: params.activeDocumentVersionId,
+    activeTimelineNodeId:
+      params.activeTimelineNodeId ??
+      current?.activeTimelineNodeId,
     updatedAt: params.now
   };
 }
@@ -145,6 +149,7 @@ function conversationWithActiveVersion(params: {
   conversationId?: string;
   conversationTitle?: string;
   activeDocumentVersionId: string;
+  activeTimelineNodeId?: string;
   now: string;
 }) {
   if (!params.conversationId) {
@@ -163,6 +168,9 @@ function conversationWithActiveVersion(params: {
       updatedAt: params.now
     }),
     activeDocumentVersionId: params.activeDocumentVersionId,
+    activeTimelineNodeId:
+      params.activeTimelineNodeId ??
+      current?.activeTimelineNodeId,
     updatedAt: params.now
   };
 }
@@ -425,6 +433,7 @@ export class DocumentVersionService {
       projectId: input.projectId,
       projectName: input.projectName,
       activeDocumentVersionId: documentVersion.id,
+      activeTimelineNodeId: eventResult.timelineNode.id,
       now: input.now
     });
     const conversation = conversationWithActiveVersion({
@@ -433,6 +442,7 @@ export class DocumentVersionService {
       conversationId: input.conversationId,
       conversationTitle: input.conversationTitle,
       activeDocumentVersionId: documentVersion.id,
+      activeTimelineNodeId: eventResult.timelineNode.id,
       now: input.now
     });
     const documentVersions = {
@@ -1036,6 +1046,7 @@ export class DocumentVersionService {
       state: input.state,
       projectId: draft.projectId,
       activeDocumentVersionId: nextVersion.id,
+      activeTimelineNodeId: timelineNodeId,
       now: input.now
     });
     const conversation = conversationWithActiveVersion({
@@ -1043,6 +1054,7 @@ export class DocumentVersionService {
       projectId: draft.projectId,
       conversationId: draft.conversationId,
       activeDocumentVersionId: nextVersion.id,
+      activeTimelineNodeId: timelineNodeId,
       now: input.now
     });
     let nextState: RevisionRepositoryState = {
