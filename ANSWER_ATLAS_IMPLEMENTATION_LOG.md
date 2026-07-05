@@ -1,5 +1,48 @@
 # Answer Atlas 实现记录
 
+## 2026-07-06 - 顶部品牌名称改为 NOESIS
+
+### 修改原因
+
+用户指出顶部 header 中仍显示：
+
+```text
+Answer Atlas
+```
+
+需要改为：
+
+```text
+NOESIS
+```
+
+### 修改文件
+
+```text
+src/components/layout/AppHeader.tsx
+src/app/layout.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### 修改内容
+
+顶部左侧主品牌名从 `Answer Atlas` 改为 `NOESIS`。
+
+浏览器页面 metadata title 也从 `Answer Atlas` 改为 `NOESIS`，使页面标题与界面品牌一致。
+
+### Memory / LLM 影响
+
+本次修改只影响前端品牌显示：
+
+```text
+不改变 LLM prompt
+不改变 ContextSnapshot
+不改变 EventLog
+不改变 TimelineNode
+不改变项目数据结构
+不改变任何 memory scope
+```
+
 ## 2026-07-06 - Semantic Difference Map 改为 Difference Lens 可视化
 
 ### 修改原因

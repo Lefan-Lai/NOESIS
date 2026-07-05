@@ -33,7 +33,7 @@ export function AppHeader() {
     <header className="flex h-[62px] shrink-0 items-center gap-3 border-b border-line px-4 max-[900px]:px-3">
       <div className="flex min-w-[430px] items-baseline gap-5 max-[1280px]:min-w-[220px] max-[900px]:min-w-0">
         <h1 className="whitespace-nowrap text-2xl font-bold tracking-normal text-ink">
-          Answer Atlas
+          NOESIS
         </h1>
         <p className="text-sm font-medium text-slate-600 max-[1280px]:hidden">
           Document Answer + Side Threads + Structure Map
