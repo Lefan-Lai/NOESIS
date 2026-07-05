@@ -1,5 +1,688 @@
 # Answer Atlas 实现记录
 
+## 2026-07-06 - Semantic Difference Map 改为 Difference Lens 可视化
+
+### 修改原因
+
+用户指出当前 `Semantic Difference Map` 的可视性仍然偏差：
+
+```text
+不要再让用户在 Original / Revised 两种卡片视图之间切换。
+用户真正需要的是直接看到原句在哪里，以及现在到底变成了什么。
+```
+
+因此本次将主展示层从“对照卡片列表”改成：
+
+```text
+以原回答位置为底图
+只强调发生变化的位置
+每条变化直接显示 source sentence 和 current difference
+```
+
+### 修改文件
+
+```text
+src/components/comparison/SemanticDifferenceMapView.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### 新的展示结构
+
+Layer 2 从：
+
+```text
+Review Queue
+Original Context / Revised Result toggle
+一张张大卡片
+```
+
+改为：
+
+```text
+Difference Lens
+按原文 / 插入位置顺序排列
+每条 row 显示原句锚点
+每条 row 下方直接显示当前差异
+```
+
+用户现在看到的结构是：
+
+```text
+Source sentence
+当前原句或插入点说明
+
+Current difference
+当前版本中对应的新句子 / 删除说明 / 新增内容
+```
+
+### 默认过滤规则
+
+默认仍然使用：
+
+```text
+Important Changes
+```
+
+也就是说：
+
+```text
+unchanged 不默认展示
+low importance 且无明显 tag / risk 的变化不默认展示
+annotation-linked / question-linked / risk / evidence 等变化会优先出现
+```
+
+用户仍然可以切换：
+
+```text
+Important Changes
+All Changes
+Annotation-linked
+Preserved
+```
+
+但主视图不再使用 Original / Revised side toggle。
+
+### 每条 Difference Lens row 的显示规则
+
+每条 row 显示：
+
+```text
+位置编号
+semantic block type
+change label
+risk
+source cue
+where changed
+source sentence
+current difference
+semantic tags
+suggested action
+```
+
+change label 根据 `primaryChange` 生成：
+
+```text
+added     -> Added here
+removed   -> Removed
+moved     -> Moved
+split     -> Split
+merged    -> Merged
+unchanged -> Preserved
+rewritten -> Rewritten
+```
+
+source cue 根据 `triggeredBy` 生成：
+
+```text
+annotation        -> from note
+user_question     -> from question
+context_alignment -> context aligned
+other             -> model inferred
+```
+
+### 颜色规则
+
+当前颜色不再表示左右两栏，而表示变化类型和风险：
+
+```text
+high risk / risk_introduced -> red
+added                       -> green
+removed                     -> red
+moved                       -> purple
+unchanged                   -> gray
+rewritten / normal change   -> blue
+```
+
+### Detail 面板文案修改
+
+右侧 Layer 3 从：
+
+```text
+Local Difference Explanation
+Original
+Revised
+```
+
+改为：
+
+```text
+Difference Inspector
+Source sentence
+Current sentence
+```
+
+这样右侧仍然可以查看完整解释，但主展示层不再是拥挤的 Original / Revised 对照表。
+
+### Memory / LLM 影响
+
+本次修改只改变 Semantic Difference Map 的前端可视化：
+
+```text
+不改变 ComparisonGraph 数据结构
+不改变 LLM prompt
+不改变 ContextSnapshot
+不改变 EventLog
+不改变 TimelineNode
+不改变 DocumentVersion
+```
+
+点击 row 的联动高亮逻辑仍然保留：
+
+```text
+点击 Difference Lens row
+→ 设置 activeReviewFocus
+→ main answer window 高亮 source sentence
+→ local / nested answer window 高亮 current sentence
+```
+
+## 2026-07-05 - Semantic Difference Map 增加联动高亮与自动定位
+
+### 修改原因
+
+用户指出 Semantic Difference Map 不应该只在 map 卡片里解释“哪里变了”，更应该在真实回答窗口中直接定位：
+
+```text
+点击某条 semantic difference
+→ main answer window 自动滚动到对应 original 句子或段落
+→ local / revised answer window 自动滚动到对应 revised 句子或段落
+→ 两边对应内容高亮
+```
+
+这样用户不需要依赖 `local context` 文字解释，也不用自己在长回答里寻找对应位置。
+
+### 修改文件
+
+```text
+src/store/useAnswerAtlasStore.ts
+src/components/comparison/SemanticDifferenceMapView.tsx
+src/components/document/DocumentAnswerRenderer.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### 新增 Review Focus 状态
+
+store 新增临时 UI 状态：
+
+```text
+activeReviewFocus
+setActiveReviewFocus
+```
+
+这个状态记录当前被用户选中的 semantic difference row，包括：
+
+```text
+semanticRowId
+anchorId
+documentId
+originalBlockId
+revisedBlockId
+originalText
+revisedText
+originalIndex
+revisedIndex
+primaryChange
+createdAt
+```
+
+### 运行逻辑
+
+用户点击 Semantic Difference Map 的某一行时：
+
+```text
+SemanticDifferenceMapView.selectRow(row)
+→ setSelectedRowId(row.id)
+→ setActiveReviewFocus(...)
+→ 继续按原逻辑生成 / 读取 Layer 3 detail
+```
+
+主回答与 local answer 使用同一个 `DocumentAnswerRenderer`。该 renderer 会监听 `activeReviewFocus`：
+
+```text
+toolbarMode = main_answer
+→ 使用 activeReviewFocus.originalText
+→ 在主回答 DOM 中查找匹配段落 / 句子
+→ 自动 scrollIntoView
+→ 蓝色高亮
+
+toolbarMode = local_answer
+→ 使用 activeReviewFocus.revisedText
+→ 在 local / nested local 回答 DOM 中查找匹配段落 / 句子
+→ 自动 scrollIntoView
+→ 紫色高亮
+```
+
+### 匹配规则
+
+优先使用精确文本匹配：
+
+```text
+normalize whitespace
+normalize curly quotes
+case-insensitive includes
+```
+
+如果精确匹配失败，会使用关键词 fallback：
+
+```text
+提取长度大于 3 的重要词
+在候选段落中计算命中数
+命中比例达到阈值后认为是对应位置
+```
+
+候选 DOM 节点包括：
+
+```text
+p
+li
+blockquote
+h1-h6
+pre
+code
+```
+
+### Memory / LLM 影响
+
+这次修改只影响前端 review navigation：
+
+```text
+不会写入 LLM memory
+不会进入 ContextSnapshot
+不会创建 EventLog
+不会创建 TimelineNode
+不会改变 DocumentVersion
+不会改变 ComparisonGraph 数据
+```
+
+它只是把 Semantic Difference Map 的 row selection 映射成一个临时 UI focus，帮助用户快速看见 original / revised 的对应位置。
+
+## 2026-07-05 - Semantic Difference Map 增加 Original Context / Revised Result 与 Where Changed 锚点
+
+### 修改原因
+
+用户指出仅展示修改后的 semantic block 不合理：
+
+```text
+用户不知道这条修改发生在原回答哪里。
+用户不知道 revised block 对应哪一句原文。
+只显示 revised 会丢失 original anchor。
+```
+
+因此 Semantic Difference Map 不能只是展示“修改结果”，而必须展示：
+
+```text
+修改发生的位置
+原句锚点
+修改结果
+另一侧预览
+处理建议
+```
+
+### 修改文件
+
+```text
+src/components/comparison/SemanticDifferenceMapView.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### 顶部视角切换
+
+Layer 2 的侧边切换从：
+
+```text
+Original / Revised
+```
+
+改为：
+
+```text
+Original Context / Revised Result
+```
+
+默认视角改为：
+
+```text
+Original Context
+```
+
+原因是 revision review 的第一步应该是定位原文，而不是先看生成结果。
+
+### 每条 row 新增 Where Changed
+
+每张 card 现在固定显示：
+
+```text
+Where changed
+Original block #n → Revised block #m · BlockType
+```
+
+特殊情况：
+
+```text
+added   -> Inserted near revised block #n
+removed -> Original block #n removed
+moved   -> Original block #n → revised block #m
+```
+
+这样即使用户当前在 `Revised Result` 模式，也知道该修改对应原文哪里。
+
+### 主显示区规则
+
+`Original Context` 模式：
+
+```text
+主显示 original block
+颜色强调原句被修改、删除或作为插入锚点
+下方保留 revised result preview
+```
+
+`Revised Result` 模式：
+
+```text
+主显示 revised block
+颜色强调新增、改写或删除结果
+下方保留 original anchor preview
+```
+
+也就是说，一次只主显示一侧，但另一侧不会完全消失。
+
+### UI 文案规则
+
+另一侧 preview 现在明确显示：
+
+```text
+Revised result preview
+Original anchor preview
+```
+
+而不是只写 `Switch to revised/original`。
+
+### Memory / LLM 影响
+
+本次仍然只是前端展示逻辑：
+
+```text
+不改变 LLM prompt
+不改变 SemanticDifferenceMap schema
+不改变 ComparisonGraph 持久化
+不改变 ContextSnapshot
+不改变 main conversation memory
+```
+
+### 验证
+
+```text
+pnpm typecheck
+pnpm test
+```
+
+结果：
+
+```text
+typecheck passed
+5 test files passed
+72 tests passed
+```
+
+## 2026-07-05 - Semantic Difference Map 默认隐藏 unchanged，改为 Review Queue
+
+### 修改原因
+
+用户指出 Semantic Difference Map 存在一个展示误区：
+
+```text
+unchanged 不应该作为主要内容展示。
+```
+
+Semantic Difference Map 的主要目标不是完整对齐所有文本，而是帮助用户快速审查：
+
+1. 哪里被修改了。
+2. 哪里和用户问题或 annotation 有关。
+3. 哪里可能影响 merge。
+4. 哪里可能影响 future LLM context。
+
+因此 `unchanged` 应该默认隐藏，只在用户需要检查 preserved context 时单独查看。
+
+### 修改文件
+
+```text
+src/components/comparison/SemanticDifferenceMapView.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### 新默认视图
+
+Layer 2 从：
+
+```text
+Focused Difference List
+```
+
+进一步改为：
+
+```text
+Review Queue
+```
+
+默认 filter：
+
+```text
+Important Changes
+```
+
+默认不显示：
+
+```text
+primaryChange = unchanged
+low importance + no risk + only context_aligned 的轻微内容
+```
+
+### 新增过滤器
+
+Layer 2 顶部新增 review filter：
+
+```text
+Important Changes
+All Changes
+Annotation-linked
+Preserved
+```
+
+规则：
+
+```text
+Important Changes:
+  显示非 unchanged，且满足 importance/risk/tag/question/annotation 任一重要条件
+
+All Changes:
+  显示所有非 unchanged row
+
+Annotation-linked:
+  显示 triggeredBy = annotation 且发生修改的 row
+
+Preserved:
+  只显示 primaryChange = unchanged 的 row
+```
+
+### 视觉规则
+
+每条 row 现在更像一个 revision review item。
+
+新增优先级 pill：
+
+```text
+Review first
+Note-linked
+Question-linked
+Preserved
+Review change
+```
+
+新增 `Suggested action`：
+
+```text
+Review before merge.
+Check against the active annotation.
+Check whether it answers your local question.
+Likely useful support; verify before merge.
+No action by default. Use only when you need to verify preserved context.
+```
+
+### Memory / LLM 影响
+
+本次修改只改变前端可视化和过滤规则：
+
+```text
+不改变 LLM prompt
+不改变 SemanticDifferenceMap schema
+不改变 ComparisonGraph 持久化
+不改变 ContextSnapshot
+不改变 main conversation memory
+```
+
+`unchanged` 只是默认 UI 隐藏，不是删除，也不是从底层数据移除。
+
+### 验证
+
+```text
+pnpm typecheck
+pnpm test
+```
+
+结果：
+
+```text
+typecheck passed
+5 test files passed
+72 tests passed
+```
+
+## 2026-07-05 - Semantic Difference Map 改为宽行单侧切换展示
+
+### 修改原因
+
+用户觉得原来的 Semantic Difference Map 显示不够清晰：
+
+1. Layer 2 使用 Original / Change / Revised 三栏小卡片，文本稍长就被挤压。
+2. 很多语义差异需要看完整上下文，小卡片预览不够。
+3. 差异颜色主要体现在标签上，用户不容易直接看出当前文本块是新增、删除、改写还是风险变化。
+4. 用户希望 Layer 2 可以只显示 Original 或 Revised，并允许手动切换。
+
+### 修改文件
+
+```text
+src/components/comparison/SemanticDifferenceMapView.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### Layer 1 修改
+
+Layer 1 仍然是 `Difference Overview`，但新增了更明显的总览判断条：
+
+```text
+Meaning
+Risk
+Main Change
+Changed Blocks
+```
+
+这些信息来自现有 `SemanticDifferenceMap.overview`，不需要新增 LLM schema。
+
+### Layer 2 修改
+
+Layer 2 从：
+
+```text
+Original | Change | Revised
+```
+
+改为：
+
+```text
+Focused Difference List
+```
+
+并新增全局视角切换：
+
+```text
+Original / Revised
+```
+
+当前规则：
+
+1. 默认显示 `Revised` 视角。
+2. 用户可以切换到 `Original`。
+3. 每条 semantic row 变成一张宽行卡片。
+4. 当前视角的文本以大文本块展示。
+5. 另一侧不再和当前侧并排挤在一起，只显示一行提示，引导用户切换查看。
+6. 行内仍显示 change type、importance、risk、semantic tags。
+
+### 颜色规则
+
+现在文本块本身也会用颜色表达差异：
+
+```text
+Original + removed      -> red
+Original + changed      -> amber
+Revised + added         -> green
+Revised + changed       -> blue
+High risk               -> red emphasis
+Unchanged               -> slate
+```
+
+这些颜色只是视觉解释，不改变底层数据和 memory 规则。
+
+### Layer 3 修改
+
+Layer 3 仍然是 `Local Difference Explanation`。
+
+但在大屏幕下，它会和 Layer 2 并排显示为右侧详情区：
+
+```text
+Layer 2 wide list | Layer 3 detail panel
+```
+
+这样用户点击某条变化后，不需要滚到页面底部才能看解释。
+
+### LLM / Memory 影响
+
+本次修改只改变前端展示：
+
+```text
+不改变 SemanticDifferenceMap schema
+不改变 LLM 生成 prompt
+不改变 ComparisonGraph 持久化
+不改变 ContextSnapshot
+不改变 main conversation memory
+```
+
+Layer 2 使用已有字段：
+
+```text
+originalBlock
+revisedBlock
+primaryChange
+importance
+risk
+semanticTags
+shortReason
+explanation
+```
+
+### 验证
+
+```text
+pnpm typecheck
+pnpm test
+```
+
+结果：
+
+```text
+typecheck passed
+5 test files passed
+72 tests passed
+```
+
 ## 2026-07-05 - 修复 Thread Navigator 中 Project Rename 的交互 bug
 
 ### 修改原因

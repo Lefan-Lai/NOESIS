@@ -169,6 +169,22 @@ type ProjectSnapshot = {
   revisionSuggestions: Record<string, string>;
 };
 
+export type ReviewFocus = {
+  id: string;
+  source: "semantic_difference_map" | "manual";
+  semanticRowId?: string;
+  anchorId?: string;
+  documentId?: string;
+  originalBlockId?: string;
+  revisedBlockId?: string;
+  originalText?: string;
+  revisedText?: string;
+  originalIndex?: number;
+  revisedIndex?: number;
+  primaryChange?: string;
+  createdAt: string;
+};
+
 type Project = {
   id: string;
   name: string;
@@ -439,7 +455,8 @@ function applyProjectSnapshot(
     pendingMergeDiff: null,
     mergeConflictMessage: null,
     activeRevisionBranchId: snapshot.activeRevisionBranchId ?? null,
-    activeMergeRecordId: snapshot.activeMergeRecordId ?? null
+    activeMergeRecordId: snapshot.activeMergeRecordId ?? null,
+    activeReviewFocus: null
   };
 }
 
@@ -523,6 +540,7 @@ export type AnswerAtlasState = {
   isSideThreadOpen: boolean;
   isSideThreadMinimized: boolean;
   isComparisonExpanded: boolean;
+  activeReviewFocus: ReviewFocus | null;
   activeUtilityPanel:
     | null
     | "help"
@@ -536,6 +554,7 @@ export type AnswerAtlasState = {
     | "data"
     | "settings";
   revisionSuggestions: Record<string, string>;
+  setActiveReviewFocus: (focus: ReviewFocus | null) => void;
   createProject: () => void;
   renameProject: (projectId: string, name: string) => void;
   deleteProject: (projectId: string) => boolean;
@@ -1433,6 +1452,7 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
   isSideThreadOpen: false,
   isSideThreadMinimized: false,
   isComparisonExpanded: false,
+  activeReviewFocus: null,
   activeUtilityPanel: null,
   revisionSuggestions: {},
 
@@ -1636,6 +1656,12 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
     set((state) => ({
       isComparisonExpanded: !state.isComparisonExpanded
     }));
+  },
+
+  setActiveReviewFocus: (focus) => {
+    set({
+      activeReviewFocus: focus
+    });
   },
 
   closeRevisionBranchPanel: () => {

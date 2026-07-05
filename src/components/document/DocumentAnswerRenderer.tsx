@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   GitBranchPlus,
   GitMerge,
@@ -9,6 +9,7 @@ import {
   StickyNote
 } from "lucide-react";
 import { MarkdownText } from "@/components/MarkdownText";
+import { useAnswerAtlasStore } from "@/store/useAnswerAtlasStore";
 import {
   readBrowserTextSelection,
   type BrowserTextSelectionPayload,
@@ -37,6 +38,91 @@ type DocumentAnswerRendererProps = {
   onMergeSelection?: (selection: TextSelectionDraft) => void;
 };
 
+function normalizeReviewText(value: string) {
+  return value
+    .replace(/[“”]/g, "\"")
+    .replace(/[‘’]/g, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function importantWords(value: string) {
+  return normalizeReviewText(value)
+    .replace(/[^\p{L}\p{N}\s'-]/gu, " ")
+    .split(/\s+/)
+    .filter((word) => word.length > 3)
+    .slice(0, 16);
+}
+
+function findLinkedReviewElement(root: HTMLElement, snippet?: string) {
+  if (!snippet || normalizeReviewText(snippet).length < 6) {
+    return null;
+  }
+
+  const normalizedSnippet = normalizeReviewText(snippet);
+  const candidates = Array.from(
+    root.querySelectorAll<HTMLElement>(
+      "p, li, blockquote, h1, h2, h3, h4, h5, h6, pre, code"
+    )
+  );
+  const directMatch = candidates.find((element) =>
+    normalizeReviewText(element.textContent ?? "").includes(normalizedSnippet)
+  );
+
+  if (directMatch) {
+    return directMatch;
+  }
+
+  const words = importantWords(snippet);
+
+  if (words.length < 3) {
+    return null;
+  }
+
+  return (
+    candidates.find((element) => {
+      const text = normalizeReviewText(element.textContent ?? "");
+      const hits = words.filter((word) => text.includes(word)).length;
+
+      return hits >= Math.min(5, Math.ceil(words.length * 0.55));
+    }) ?? null
+  );
+}
+
+function clearLinkedReviewHighlight(root: HTMLElement) {
+  root
+    .querySelectorAll<HTMLElement>("[data-review-linked-focus='true']")
+    .forEach((element) => {
+      element.removeAttribute("data-review-linked-focus");
+      element.style.backgroundColor = "";
+      element.style.boxShadow = "";
+      element.style.borderRadius = "";
+      element.style.paddingInline = "";
+      element.style.scrollMargin = "";
+      element.style.transition = "";
+    });
+}
+
+function applyLinkedReviewHighlight(
+  element: HTMLElement,
+  tone: "original" | "revised"
+) {
+  const isOriginal = tone === "original";
+
+  element.setAttribute("data-review-linked-focus", "true");
+  element.style.backgroundColor = isOriginal
+    ? "rgba(37, 99, 235, 0.10)"
+    : "rgba(124, 58, 237, 0.11)";
+  element.style.boxShadow = isOriginal
+    ? "0 0 0 2px rgba(37, 99, 235, 0.24)"
+    : "0 0 0 2px rgba(124, 58, 237, 0.24)";
+  element.style.borderRadius = "8px";
+  element.style.paddingInline = "4px";
+  element.style.scrollMargin = "96px";
+  element.style.transition = "background-color 160ms ease, box-shadow 160ms ease";
+}
+
 export function DocumentAnswerRenderer({
   answerId,
   text,
@@ -51,6 +137,50 @@ export function DocumentAnswerRenderer({
   const rootRef = useRef<HTMLDivElement>(null);
   const [selection, setSelection] = useState<TextSelectionDraft | null>(null);
   const [position, setPosition] = useState<ToolbarPosition | null>(null);
+  const activeReviewFocus = useAnswerAtlasStore(
+    (state) => state.activeReviewFocus
+  );
+
+  useEffect(() => {
+    const root = rootRef.current;
+
+    if (!root) {
+      return;
+    }
+
+    clearLinkedReviewHighlight(root);
+
+    if (!activeReviewFocus) {
+      return;
+    }
+
+    const tone = toolbarMode === "main_answer" ? "original" : "revised";
+    const snippet =
+      tone === "original"
+        ? activeReviewFocus.originalText
+        : activeReviewFocus.revisedText;
+    const target = findLinkedReviewElement(root, snippet);
+
+    if (!target) {
+      return;
+    }
+
+    applyLinkedReviewHighlight(target, tone);
+    target.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+      inline: "nearest"
+    });
+
+    return () => clearLinkedReviewHighlight(root);
+  }, [
+    activeReviewFocus,
+    activeReviewFocus?.id,
+    activeReviewFocus?.originalText,
+    activeReviewFocus?.revisedText,
+    text,
+    toolbarMode
+  ]);
 
   function clearToolbar() {
     setSelection(null);
