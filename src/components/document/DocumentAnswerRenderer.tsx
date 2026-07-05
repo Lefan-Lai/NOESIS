@@ -1,14 +1,23 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { GitBranchPlus, MessageSquare, PencilLine, StickyNote } from "lucide-react";
+import {
+  GitBranchPlus,
+  GitMerge,
+  MessageSquare,
+  PencilLine,
+  StickyNote
+} from "lucide-react";
+import { MarkdownText } from "@/components/MarkdownText";
+import {
+  readBrowserTextSelection,
+  type BrowserTextSelectionPayload,
+  type SelectionSourcePayload
+} from "@/lib/selection/readTextSelection";
 
-export type TextSelectionDraft = {
-  selectedText: string;
-  startOffset: number;
-  endOffset: number;
-  contextBefore: string;
-  contextAfter: string;
+export type TextSelectionDraft = BrowserTextSelectionPayload & {
+  createdFromWindowId?: string;
+  sourceThreadId?: string;
 };
 
 type ToolbarPosition = {
@@ -19,36 +28,25 @@ type ToolbarPosition = {
 type DocumentAnswerRendererProps = {
   answerId: string;
   text: string;
+  source: SelectionSourcePayload;
+  toolbarMode?: "main_answer" | "local_answer";
   onAskAboutThis: (selection: TextSelectionDraft) => void;
   onReviseThis: (selection: TextSelectionDraft) => void;
   onCreateBranch: (selection: TextSelectionDraft) => void;
   onAddNote: (selection: TextSelectionDraft) => void;
+  onMergeSelection?: (selection: TextSelectionDraft) => void;
 };
-
-function selectionOffsets(root: HTMLElement, range: Range, selectedText: string) {
-  const beforeRange = range.cloneRange();
-  beforeRange.selectNodeContents(root);
-  beforeRange.setEnd(range.startContainer, range.startOffset);
-
-  const startOffset = beforeRange.toString().length;
-  const endOffset = startOffset + selectedText.length;
-  const fullText = root.textContent ?? "";
-
-  return {
-    startOffset,
-    endOffset,
-    contextBefore: fullText.slice(Math.max(0, startOffset - 30), startOffset),
-    contextAfter: fullText.slice(endOffset, endOffset + 30)
-  };
-}
 
 export function DocumentAnswerRenderer({
   answerId,
   text,
+  source,
+  toolbarMode = "main_answer",
   onAskAboutThis,
   onReviseThis,
   onCreateBranch,
-  onAddNote
+  onAddNote,
+  onMergeSelection
 }: DocumentAnswerRendererProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [selection, setSelection] = useState<TextSelectionDraft | null>(null);
@@ -68,9 +66,7 @@ export function DocumentAnswerRenderer({
       return;
     }
 
-    const selectedText = activeSelection.toString().trim();
-
-    if (!selectedText || activeSelection.rangeCount === 0) {
+    if (activeSelection.rangeCount === 0) {
       clearToolbar();
       return;
     }
@@ -82,13 +78,16 @@ export function DocumentAnswerRenderer({
       return;
     }
 
-    const offsets = selectionOffsets(root, range, selectedText);
+    const payload = readBrowserTextSelection(root, source);
+
+    if (!payload) {
+      clearToolbar();
+      return;
+    }
+
     const rect = range.getBoundingClientRect();
 
-    setSelection({
-      selectedText,
-      ...offsets
-    });
+    setSelection(payload);
     setPosition({
       top: rect.top + window.scrollY - 44,
       left: rect.left + window.scrollX + rect.width / 2
@@ -111,9 +110,9 @@ export function DocumentAnswerRenderer({
         ref={rootRef}
         id={`answer-${answerId}`}
         onMouseUp={handleMouseUp}
-        className="select-text whitespace-pre-wrap text-[15px] leading-8 text-slate-800"
+        className="select-text text-[15px] text-slate-800"
       >
-        {text}
+        <MarkdownText text={text} />
       </div>
 
       {selection && position && (
@@ -126,36 +125,79 @@ export function DocumentAnswerRenderer({
         >
           <button
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() => run(onAskAboutThis)}
+            onClick={() =>
+              run(toolbarMode === "local_answer" ? onReviseThis : onAskAboutThis)
+            }
             className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-700 hover:bg-blue-50 hover:text-atlasBlue"
           >
-            <MessageSquare size={14} />
-            Ask
+            {toolbarMode === "local_answer" ? (
+              <PencilLine size={14} />
+            ) : (
+              <MessageSquare size={14} />
+            )}
+            {toolbarMode === "local_answer" ? "Revise" : "Ask Locally"}
           </button>
           <button
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() => run(onReviseThis)}
+            onClick={() =>
+              run(toolbarMode === "local_answer" ? onCreateBranch : onReviseThis)
+            }
             className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-700 hover:bg-blue-50 hover:text-atlasBlue"
           >
-            <PencilLine size={14} />
-            Revise
+            {toolbarMode === "local_answer" ? (
+              <GitBranchPlus size={14} />
+            ) : (
+              <PencilLine size={14} />
+            )}
+            {toolbarMode === "local_answer" ? "Branch" : "Open Local Window"}
           </button>
-          <button
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => run(onCreateBranch)}
-            className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-700 hover:bg-blue-50 hover:text-atlasBlue"
-          >
-            <GitBranchPlus size={14} />
-            Branch
-          </button>
-          <button
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => run(onAddNote)}
-            className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-700 hover:bg-amber-50 hover:text-amber-700"
-          >
-            <StickyNote size={14} />
-            Note
-          </button>
+          {toolbarMode === "main_answer" && (
+            <>
+              <button
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => run(onCreateBranch)}
+                disabled
+                className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-400"
+                title="Branch editing starts from local answer selections in Phase 3."
+              >
+                <GitBranchPlus size={14} />
+                Branch
+              </button>
+              <button
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => run(onAddNote)}
+                className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-700 hover:bg-amber-50 hover:text-amber-700"
+                title="Add context note for this selection."
+              >
+                <StickyNote size={14} />
+                Note
+              </button>
+            </>
+          )}
+          {toolbarMode === "local_answer" && (
+            <>
+              {onMergeSelection && (
+                <button
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => run(onMergeSelection)}
+                  className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-700 hover:bg-purple-50 hover:text-atlasPurple"
+                  title="Create a merge proposal for this selected fragment."
+                >
+                  <GitMerge size={14} />
+                  Merge
+                </button>
+              )}
+              <button
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => run(onAddNote)}
+                className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-700 hover:bg-amber-50 hover:text-amber-700"
+                title="Keep selected fragment as scoped context note."
+              >
+                <StickyNote size={14} />
+                Keep Note
+              </button>
+            </>
+          )}
         </div>
       )}
     </>

@@ -3,16 +3,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAnswerAtlasStore } from "@/store/useAnswerAtlasStore";
 import { getBlocksVisibleAtVersion } from "@/lib/version/getBlocksVisibleAtVersion";
+import { MarkdownText } from "@/components/MarkdownText";
+import { DiffService, type TextDiff } from "@/services/revision/DiffService";
+import type { DocumentVersionModel } from "@/types/revision";
 import {
   DocumentAnswerRenderer,
   type TextSelectionDraft
 } from "./DocumentAnswerRenderer";
 import { DocumentToolbar } from "./DocumentToolbar";
+import { DiffReviewModal } from "./DiffReviewModal";
+import { DocumentVersionHistoryPanel } from "./DocumentVersionHistoryPanel";
 import {
   ArrowLeft,
   ArrowRight,
   Bot,
+  GitCompareArrows,
   History,
+  PencilLine,
   RotateCcw,
   Send,
   Sparkles,
@@ -25,8 +32,23 @@ type MainDocumentPanelProps = {
 
 export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
   const [prompt, setPrompt] = useState("");
+  const [editDraftId, setEditDraftId] = useState<string | null>(null);
+  const [draftContent, setDraftContent] = useState("");
+  const [diffForReview, setDiffForReview] = useState<TextDiff | null>(null);
+  const [diffBaseVersion, setDiffBaseVersion] =
+    useState<DocumentVersionModel | null>(null);
+  const [isDiffReadOnly, setIsDiffReadOnly] = useState(false);
+  const [isVersionHistoryOpen, setIsVersionHistoryOpen] = useState(false);
+  const [versionPreview, setVersionPreview] =
+    useState<DocumentVersionModel | null>(null);
+  const [conflictMessage, setConflictMessage] = useState<string | null>(null);
   const chatAreaRef = useRef<HTMLDivElement>(null);
+  const currentProjectId = useAnswerAtlasStore((state) => state.currentProjectId);
   const documents = useAnswerAtlasStore((state) => state.documents);
+  const documentVersions = useAnswerAtlasStore((state) => state.documentVersions);
+  const manualEditDrafts = useAnswerAtlasStore(
+    (state) => state.manualEditDrafts
+  );
   const versionNodes = useAnswerAtlasStore((state) => state.versionNodes);
   const snapshots = useAnswerAtlasStore((state) => state.snapshots);
   const activeVersionNodeId = useAnswerAtlasStore(
@@ -54,6 +76,18 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
   );
   const addNoteForSelection = useAnswerAtlasStore(
     (state) => state.addNoteForSelection
+  );
+  const createManualEditDraft = useAnswerAtlasStore(
+    (state) => state.createManualEditDraft
+  );
+  const previewManualEditDraftDiff = useAnswerAtlasStore(
+    (state) => state.previewManualEditDraftDiff
+  );
+  const confirmManualEditDraft = useAnswerAtlasStore(
+    (state) => state.confirmManualEditDraft
+  );
+  const cancelManualEditDraft = useAnswerAtlasStore(
+    (state) => state.cancelManualEditDraft
   );
   const document = documents[documentId] ?? Object.values(documents)[0];
   const mainWindow = windows[mainWindowId];
@@ -91,6 +125,28 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
             message.role === "assistant" && message.contentState !== "deleted"
         ),
     [mainMessages]
+  );
+  const versionHistory = useMemo(
+    () =>
+      Object.values(documentVersions)
+        .filter(
+          (version) =>
+            version.projectId === currentProjectId &&
+            (!mainSession?.id || version.conversationId === mainSession.id)
+        )
+        .sort(
+          (a, b) =>
+            (a.versionNumber ?? 0) - (b.versionNumber ?? 0) ||
+            new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        ),
+    [currentProjectId, documentVersions, mainSession?.id]
+  );
+  const activeDocumentVersion = useMemo(
+    () =>
+      [...versionHistory]
+        .reverse()
+        .find((version) => version.status === "active"),
+    [versionHistory]
   );
 
   useEffect(() => {
@@ -149,6 +205,104 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
     }
   }
 
+  function startEditingActiveVersion() {
+    const draftId = createManualEditDraft();
+
+    if (!draftId) {
+      return;
+    }
+
+    setEditDraftId(draftId);
+    setDraftContent(
+      manualEditDrafts[draftId]?.draftContent ??
+        activeDocumentVersion?.content ??
+        latestAssistantMessage?.content ??
+        ""
+    );
+    setConflictMessage(null);
+  }
+
+  function openDiffReview() {
+    if (!editDraftId) {
+      return;
+    }
+
+    const diff = previewManualEditDraftDiff(editDraftId, draftContent);
+    const baseVersionId = manualEditDrafts[editDraftId]?.baseDocumentVersionId;
+
+    if (!diff) {
+      return;
+    }
+
+    setDiffForReview(diff);
+    setDiffBaseVersion(
+      baseVersionId ? documentVersions[baseVersionId] ?? null : null
+    );
+    setIsDiffReadOnly(false);
+    setConflictMessage(null);
+  }
+
+  function confirmDiffReview() {
+    if (!editDraftId) {
+      return;
+    }
+
+    const result = confirmManualEditDraft(editDraftId, draftContent);
+
+    if (!result) {
+      return;
+    }
+
+    if (!result.ok) {
+      setDiffForReview(result.diffAgainstCurrent ?? diffForReview);
+      setConflictMessage(
+        `Conflict: this draft was based on ${result.baseDocumentVersionId}, but the active version is ${result.activeDocumentVersionId ?? "missing"}.`
+      );
+      return;
+    }
+
+    setEditDraftId(null);
+    setDraftContent("");
+    setDiffForReview(null);
+    setDiffBaseVersion(null);
+    setIsDiffReadOnly(false);
+    setConflictMessage(null);
+  }
+
+  function cancelEditing() {
+    if (editDraftId) {
+      cancelManualEditDraft(editDraftId);
+    }
+
+    setEditDraftId(null);
+    setDraftContent("");
+    setDiffForReview(null);
+    setDiffBaseVersion(null);
+    setIsDiffReadOnly(false);
+    setConflictMessage(null);
+  }
+
+  function showVersionDiff(version: DocumentVersionModel) {
+    const parentId = version.parentDocumentVersionId ?? version.parentVersionId;
+    const parent = parentId ? documentVersions[parentId] : undefined;
+
+    if (!parent) {
+      return;
+    }
+
+    setDiffForReview(DiffService.createTextDiff(parent.content, version.content));
+    setDiffBaseVersion(parent);
+    setDraftContent(version.content);
+    setIsDiffReadOnly(true);
+    setConflictMessage(null);
+  }
+
+  function revisionMessageIdForConversation(messageId: string) {
+    return messageId.startsWith("conv-assistant-")
+      ? messageId.replace("conv-assistant-", "rev-message-assistant-")
+      : messageId;
+  }
+
   return (
     <main className="panel min-h-0 overflow-hidden rounded-lg max-[900px]:h-[520px]">
       <div className="flex h-full flex-col">
@@ -199,13 +353,49 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
             </div>
           ) : (
             <div id="answer-body" className="mx-auto max-w-4xl space-y-4 py-2">
+              {isVersionHistoryOpen && (
+                <DocumentVersionHistoryPanel
+                  versions={versionHistory}
+                  activeVersionId={activeDocumentVersion?.id}
+                  onView={(version) => setVersionPreview(version)}
+                  onViewDiff={showVersionDiff}
+                  onClose={() => setIsVersionHistoryOpen(false)}
+                />
+              )}
+              {versionPreview && (
+                <div className="rounded-lg border border-line bg-slate-50 p-3 text-sm leading-6 text-slate-800">
+                  <div className="mb-2 flex items-center justify-between">
+                    <div className="font-bold text-ink">
+                      Version {versionPreview.versionNumber ?? "?"} Preview
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setVersionPreview(null)}
+                      className="rounded-md px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-white"
+                    >
+                      Close
+                    </button>
+                  </div>
+                  <pre className="whitespace-pre-wrap">
+                    {versionPreview.status === "deleted"
+                      ? "[deleted version]"
+                      : versionPreview.content}
+                  </pre>
+                </div>
+              )}
               {mainMessages.map((message) => {
                 const isUser = message.role === "user";
                 const Icon = isUser ? UserRound : Bot;
+                const isLatestAssistant =
+                  !isUser && message.id === latestAssistantMessage?.id;
                 const canSelectAssistantAnswer =
                   !isUser &&
                   document &&
-                  message.id === latestAssistantMessage?.id;
+                  isLatestAssistant;
+                const renderedAssistantText =
+                  isLatestAssistant && activeDocumentVersion
+                    ? activeDocumentVersion.content
+                    : message.content;
 
                 return (
                   <article
@@ -228,18 +418,96 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
                           />
                           {isUser ? "You" : "Assistant"}
                         </span>
-                        {!isUser && message.modelName && (
-                          <span className="rounded bg-blue-50 px-2 py-0.5 text-xs text-atlasBlue">
-                            {message.modelName === "gpt-5.5"
-                              ? "GPT-5.5"
-                              : message.modelName}
-                          </span>
-                        )}
+                        <span className="flex items-center gap-1">
+                          {!isUser && isLatestAssistant && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={startEditingActiveVersion}
+                                disabled={!activeDocumentVersion || Boolean(editDraftId)}
+                                className="flex h-7 items-center gap-1 rounded-md border border-line bg-white px-2 text-xs font-semibold text-slate-700 disabled:opacity-50"
+                              >
+                                <PencilLine size={13} />
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setIsVersionHistoryOpen((open) => !open)
+                                }
+                                className="rounded-md border border-line bg-white px-2 py-1 text-xs font-semibold text-slate-700"
+                              >
+                                View Versions
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  activeDocumentVersion &&
+                                  showVersionDiff(activeDocumentVersion)
+                                }
+                                disabled={
+                                  !activeDocumentVersion ||
+                                  (!activeDocumentVersion.parentDocumentVersionId &&
+                                    !activeDocumentVersion.parentVersionId)
+                                }
+                                className="flex h-7 items-center gap-1 rounded-md border border-line bg-white px-2 text-xs font-semibold text-slate-700 disabled:opacity-50"
+                              >
+                                <GitCompareArrows size={13} />
+                                View Diff
+                              </button>
+                            </>
+                          )}
+                          {!isUser && message.modelName && (
+                            <span className="rounded bg-blue-50 px-2 py-0.5 text-xs text-atlasBlue">
+                              {message.modelName === "gpt-5.5"
+                                ? "GPT-5.5"
+                                : message.modelName}
+                            </span>
+                          )}
+                        </span>
                       </div>
-                      {canSelectAssistantAnswer ? (
+                      {isLatestAssistant && editDraftId ? (
+                        <div className="space-y-3">
+                          <textarea
+                            value={draftContent}
+                            onChange={(event) => setDraftContent(event.target.value)}
+                            className="min-h-[260px] w-full rounded-md border border-line bg-white p-3 text-sm leading-6 outline-none focus:border-atlasBlue"
+                          />
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={openDiffReview}
+                              className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-atlasBlue"
+                            >
+                              Preview Diff
+                            </button>
+                            <button
+                              type="button"
+                              onClick={openDiffReview}
+                              className="rounded-md bg-atlasBlue px-3 py-2 text-sm font-semibold text-white"
+                            >
+                              Save Edit
+                            </button>
+                            <button
+                              type="button"
+                              onClick={cancelEditing}
+                              className="rounded-md border border-line bg-white px-3 py-2 text-sm font-semibold text-slate-700"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : canSelectAssistantAnswer ? (
                         <DocumentAnswerRenderer
                           answerId={document.id}
-                          text={message.content}
+                          text={renderedAssistantText}
+                          source={{
+                            conversationId: mainSession?.id,
+                            sourceType: "message",
+                            sourceId: revisionMessageIdForConversation(message.id),
+                            sourceMessageId: revisionMessageIdForConversation(message.id),
+                            sourceDocumentVersionId: activeDocumentVersion?.id
+                          }}
                           onAskAboutThis={(selection) =>
                             openSelectionBranch(selection, "ask")
                           }
@@ -247,14 +515,12 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
                             openSelectionBranch(selection, "revise")
                           }
                           onCreateBranch={(selection) =>
-                            openSelectionBranch(selection, "branch")
+                            openSelectionBranch(selection, "ask")
                           }
                           onAddNote={handleAddNote}
                         />
                       ) : (
-                        <div className="whitespace-pre-line text-slate-700">
-                          {message.content}
-                        </div>
+                        <MarkdownText text={renderedAssistantText} />
                       )}
                     </div>
                   </article>
@@ -355,8 +621,33 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
           <span>Words: {wordCount}</span>
           <span>Sentences: {sentenceCount}</span>
           <span>Active node: {activeVersionNodeId ?? "none"}</span>
+          {activeDocumentVersion && (
+            <span>
+              Document version: {activeDocumentVersion.versionNumber ?? "?"}
+            </span>
+          )}
         </div>
       </div>
+      {diffForReview && (
+        <DiffReviewModal
+          diff={diffForReview}
+          baseVersion={diffBaseVersion ?? undefined}
+          draftPreview={draftContent}
+          conflictMessage={conflictMessage}
+          confirmDisabled={isDiffReadOnly || !editDraftId}
+          onConfirm={confirmDiffReview}
+          onContinueEditing={() => {
+            setDiffForReview(null);
+            setIsDiffReadOnly(false);
+            setConflictMessage(null);
+          }}
+          onCancel={() => {
+            setDiffForReview(null);
+            setIsDiffReadOnly(false);
+            setConflictMessage(null);
+          }}
+        />
+      )}
     </main>
   );
 }

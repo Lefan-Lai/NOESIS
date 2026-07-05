@@ -1,10 +1,21 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Bot, Loader2, Maximize2, MoreHorizontal, Send, UserRound } from "lucide-react";
+import {
+  Bot,
+  Loader2,
+  Maximize2,
+  MoreHorizontal,
+  Send,
+  UserRound
+} from "lucide-react";
 import { useAnswerAtlasStore } from "@/store/useAnswerAtlasStore";
 import { getComparisonForAnchor } from "@/lib/comparison/buildArgumentComparison";
 import { semanticMapFromLayeredComparisonBoard } from "@/lib/comparison/semanticDifferenceMap";
+import { MarkdownText } from "@/components/MarkdownText";
+import { ConfirmationModal } from "@/components/actions/ConfirmationModal";
+import { ButtonStateResolver } from "@/services/revision/ButtonStateResolver";
+import type { ConfirmationRequirement } from "@/types/workspaceActions";
 import { SemanticDifferenceMapView } from "./SemanticDifferenceMapView";
 
 function getAnchorLabel(blockId?: string) {
@@ -13,8 +24,14 @@ function getAnchorLabel(blockId?: string) {
 
 export function ArgumentEvidenceComparison() {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] =
+    useState<ConfirmationRequirement>();
   const [treeQuestion, setTreeQuestion] = useState("");
   const comparisons = useAnswerAtlasStore((state) => state.comparisons);
+  const comparisonGraphs = useAnswerAtlasStore(
+    (state) => state.comparisonGraphs
+  );
   const anchors = useAnswerAtlasStore((state) => state.anchors);
   const selectedAnchorId = useAnswerAtlasStore((state) => state.selectedAnchorId);
   const comparison = getComparisonForAnchor(comparisons, selectedAnchorId);
@@ -29,6 +46,9 @@ export function ArgumentEvidenceComparison() {
   const availableModels = useAnswerAtlasStore((state) => state.availableModels);
   const setWindowModel = useAnswerAtlasStore((state) => state.setWindowModel);
   const askTreeQuestion = useAnswerAtlasStore((state) => state.askTreeQuestion);
+  const executeRevisionAction = useAnswerAtlasStore(
+    (state) => state.executeRevisionAction
+  );
   const isSendingWindowMessage = useAnswerAtlasStore(
     (state) => state.isSendingWindowMessage
   );
@@ -80,6 +100,72 @@ export function ArgumentEvidenceComparison() {
       })
     );
   }, [comparison]);
+  const revisionComparison = useMemo(() => {
+    if (!comparison) {
+      return null;
+    }
+
+    const candidates = Object.values(comparisonGraphs)
+      .filter((graph) => graph.status !== "deleted")
+      .sort(
+        (a, b) =>
+          new Date(b.updatedAt ?? b.createdAt).getTime() -
+          new Date(a.updatedAt ?? a.createdAt).getTime()
+      );
+
+    return (
+      candidates.find(
+        (graph) =>
+          graph.id === comparison.id ||
+          graph.comparisonId === comparison.id ||
+          graph.scopeId === comparison.id ||
+          graph.payload?.legacy_comparison_id === comparison.id ||
+          graph.payload?.legacyComparisonId === comparison.id
+      ) ??
+      candidates.find(
+        (graph) =>
+          selectedAnchorId &&
+          (graph.scopeId === selectedAnchorId ||
+            graph.sourceObjectIds.includes(selectedAnchorId))
+      ) ??
+      null
+    );
+  }, [comparison, comparisonGraphs, selectedAnchorId]);
+  const hasPersistentComparison = Boolean(revisionComparison);
+  const comparisonTarget = revisionComparison
+    ? ({
+        objectType: "comparison_graph" as const,
+        objectId: revisionComparison.id,
+        projectId: revisionComparison.projectId,
+        conversationId: revisionComparison.conversationId,
+        status: revisionComparison.status
+      })
+    : undefined;
+  const actionUser = {
+    id: "local-user",
+    role: "owner" as const,
+    permissions: "*" as const
+  };
+  const regenerateButton = ButtonStateResolver.getButtonState(
+    "comparison.regenerate",
+    comparisonTarget,
+    actionUser
+  );
+  const clearButton = ButtonStateResolver.getButtonState(
+    "comparison.clear",
+    comparisonTarget,
+    actionUser
+  );
+  const exportButton = ButtonStateResolver.getButtonState(
+    "map.export",
+    comparisonTarget,
+    actionUser
+  );
+  const deleteButton = ButtonStateResolver.getButtonState(
+    "object.delete",
+    comparisonTarget,
+    actionUser
+  );
 
   async function submitTreeQuestion() {
     if (!treeQuestion.trim()) {
@@ -88,6 +174,79 @@ export function ArgumentEvidenceComparison() {
 
     await askTreeQuestion(treeQuestion);
     setTreeQuestion("");
+  }
+
+  function regenerateCurrentComparison() {
+    if (!revisionComparison) {
+      return;
+    }
+
+    executeRevisionAction("comparison.regenerate", {
+      target: comparisonTarget,
+      model: treeWindow?.modelConfigId ?? "gpt-5.5",
+      idempotencyKey: `comparison-regenerate-${revisionComparison.id}-${Date.now()}`
+    });
+    setMenuOpen(false);
+  }
+
+  function clearCurrentComparison() {
+    if (!revisionComparison || !comparison) {
+      return;
+    }
+
+    executeRevisionAction("comparison.clear", {
+      target: comparisonTarget,
+      legacyComparisonId: comparison.id,
+      idempotencyKey: `comparison-clear-${revisionComparison.id}`
+    });
+    setMenuOpen(false);
+  }
+
+  function exportCurrentComparison() {
+    if (!revisionComparison) {
+      return;
+    }
+
+    executeRevisionAction("map.export", {
+      target: comparisonTarget,
+      exportType: "markdown",
+      idempotencyKey: `comparison-export-${revisionComparison.id}-${Date.now()}`
+    });
+    setMenuOpen(false);
+  }
+
+  function requestDeleteCurrentComparison() {
+    if (!revisionComparison || !comparison) {
+      return;
+    }
+
+    const result = executeRevisionAction("object.delete", {
+      target: comparisonTarget,
+      legacyComparisonId: comparison.id,
+      idempotencyKey: `comparison-delete-${revisionComparison.id}`
+    });
+
+    if (result.status === "confirmation_required") {
+      setDeleteConfirmation(result.confirmation);
+      setDeleteOpen(true);
+    }
+
+    setMenuOpen(false);
+  }
+
+  function deleteCurrentComparison() {
+    if (!revisionComparison || !comparison) {
+      return;
+    }
+
+    executeRevisionAction("object.delete", {
+      target: comparisonTarget,
+      confirmed: true,
+      legacyComparisonId: comparison.id,
+      idempotencyKey: `comparison-delete-${revisionComparison.id}`
+    });
+    setDeleteOpen(false);
+    setMenuOpen(false);
   }
 
   return (
@@ -149,17 +308,40 @@ export function ArgumentEvidenceComparison() {
               </button>
               {menuOpen && (
                 <div className="absolute right-0 top-9 z-50 w-48 rounded-lg border border-line bg-white p-1 text-sm shadow-panel">
-                  <button className="w-full rounded-md px-3 py-2 text-left hover:bg-slate-50">
+                  <button
+                    onClick={regenerateCurrentComparison}
+                    disabled={!hasPersistentComparison || !regenerateButton.enabled}
+                    title={regenerateButton.disabledReason}
+                    className="w-full rounded-md px-3 py-2 text-left hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
+                  >
                     Regenerate comparison
                   </button>
                   <button className="w-full rounded-md px-3 py-2 text-left hover:bg-slate-50">
                     View source context
                   </button>
-                  <button className="w-full rounded-md px-3 py-2 text-left hover:bg-slate-50">
+                  <button
+                    onClick={exportCurrentComparison}
+                    disabled={!hasPersistentComparison || !exportButton.enabled}
+                    title={exportButton.disabledReason}
+                    className="w-full rounded-md px-3 py-2 text-left hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400"
+                  >
                     Export map
                   </button>
-                  <button className="w-full rounded-md px-3 py-2 text-left text-atlasRed hover:bg-red-50">
+                  <button
+                    onClick={clearCurrentComparison}
+                    disabled={!hasPersistentComparison || !clearButton.enabled}
+                    title={clearButton.disabledReason}
+                    className="w-full rounded-md px-3 py-2 text-left text-atlasRed hover:bg-red-50 disabled:cursor-not-allowed disabled:text-slate-400"
+                  >
                     Clear comparison
+                  </button>
+                  <button
+                    onClick={requestDeleteCurrentComparison}
+                    disabled={!hasPersistentComparison || !deleteButton.enabled}
+                    title={deleteButton.disabledReason}
+                    className="w-full rounded-md px-3 py-2 text-left text-atlasRed hover:bg-red-50 disabled:cursor-not-allowed disabled:text-slate-400"
+                  >
+                    Delete comparison
                   </button>
                 </div>
               )}
@@ -214,9 +396,7 @@ export function ArgumentEvidenceComparison() {
                               </span>
                             )}
                           </div>
-                          <div className="whitespace-pre-line text-slate-700">
-                            {message.content}
-                          </div>
+                          <MarkdownText text={message.content} />
                         </article>
                       );
                     })
@@ -292,6 +472,12 @@ export function ArgumentEvidenceComparison() {
           </div>
         </div>
       </div>
+      <ConfirmationModal
+        open={deleteOpen}
+        requirement={deleteConfirmation}
+        onCancel={() => setDeleteOpen(false)}
+        onConfirm={deleteCurrentComparison}
+      />
     </section>
   );
 }

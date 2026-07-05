@@ -15,6 +15,10 @@ export type LocalThread = {
   selectedText?: string;
   parentThreadId?: string;
   sourceMessageId?: string;
+  sourceSelectionId?: string;
+  sourceLocalSelectionId?: string;
+  revisionLocalThreadId?: string;
+  revisionThreadType?: "local" | "nested_local";
   status: ThreadStatus;
   visibility: "visible" | "hidden";
   contextPolicy: "include" | "exclude";
@@ -34,6 +38,9 @@ export type ThreadMessage = {
   content: string;
   modelConfigId?: string;
   modelName?: string;
+  llmCallId?: string;
+  contextSnapshotId?: string;
+  revisionMessageId?: string;
   contentState: "normal" | "discarded_but_contextual" | "deleted";
   includeInContext: boolean;
   createdAt: string;

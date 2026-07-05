@@ -1,0 +1,43 @@
+import type { RevisionRepositoryState } from "@/types/revision";
+
+export function createEmptyRevisionState(): RevisionRepositoryState {
+  return {
+    projects: {},
+    mainConversations: {},
+    revisionMessages: {},
+    documentVersions: {},
+    manualEditDrafts: {},
+    textSelections: {},
+    localThreads: {},
+    localSelections: {},
+    annotations: {},
+    revisionBranches: {},
+    mergeRecords: {},
+    comparisonGraphs: {},
+    comparisonRuns: {},
+    comparisonExports: {},
+    objectStateTransitions: {},
+    timelinePaths: {},
+    revertRecords: {},
+    eventLogs: {},
+    timelineNodes: {},
+    timelineEdges: {},
+    llmCallRecords: {},
+    contextSnapshots: {},
+    actionIdempotencyRecords: {},
+    migrationJobs: {},
+    migrationBatches: {},
+    migrationIssues: {},
+    backfillRecords: {},
+    featureFlags: {},
+    workspaceIndexes: {},
+    workspaceMetrics: {},
+    timelineNodeProjections: {},
+    timelineGraphSnapshots: {},
+    objectRelationIndex: {},
+    contextItemIndex: {},
+    threadSummaries: {},
+    documentChunks: {},
+    contextBuildCaches: {}
+  };
+}

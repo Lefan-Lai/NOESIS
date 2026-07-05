@@ -56,3 +56,83 @@ export type ContextPreview = {
   excludedItems: ContextItem[];
   tokenEstimate: number;
 };
+
+export type ContextSnapshotItem = {
+  id: string;
+  type: string;
+  sourceId?: string;
+  text: string;
+  reason: string;
+  included: boolean;
+};
+
+export type ContextSnapshot = {
+  id: string;
+  llmCallId: string;
+  projectId: string;
+  callType:
+    | "main_conversation"
+    | "local_window"
+    | "comparison_generation"
+    | "comparison_chat";
+  purpose: BuildContextParams["purpose"] | "comparison_chat";
+  model: string;
+  windowId?: string;
+  sessionId?: string;
+  documentId?: string;
+  activeVersionNodeId?: string;
+  threadId?: string;
+  threadType?: "main" | "local" | "nested_local" | "branch" | "comparison";
+  comparisonId?: string;
+  status?: "active" | "reconstructed" | "deleted";
+  includedItems: ContextSnapshotItem[];
+  excludedItems: ContextSnapshotItem[];
+  compressedItems?: ContextSnapshotItem[];
+  truncatedItems?: ContextSnapshotItem[];
+  tokenEstimate: number;
+  contextBuildStrategy?: "legacy" | "indexed" | "cached" | "reconstructed";
+  contextRulesVersion?: string;
+  cacheHit?: boolean;
+  cacheKey?: string;
+  cacheInvalidatedReason?: string;
+  candidateCount?: number;
+  includedCount?: number;
+  excludedCount?: number;
+  compressedCount?: number;
+  truncatedCount?: number;
+  tokenBudget?: number;
+  tokenEstimateBefore?: number;
+  tokenEstimateAfter?: number;
+  buildLatencyMs?: number;
+  retrievalLatencyMs?: number;
+  rankingLatencyMs?: number;
+  compressionLatencyMs?: number;
+  createdAt: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type LLMCallRecord = {
+  id: string;
+  projectId: string;
+  callType: ContextSnapshot["callType"];
+  purpose: ContextSnapshot["purpose"];
+  model: string;
+  provider?: "openai" | "mock";
+  modelProvider?: "openai" | "mock" | "unknown";
+  status: "started" | "completed" | "failed";
+  prompt: string;
+  contextSnapshotId: string;
+  inputMessageId?: string;
+  windowId?: string;
+  sessionId?: string;
+  documentId?: string;
+  activeVersionNodeId?: string;
+  threadId?: string;
+  threadType?: "main" | "local" | "nested_local" | "branch" | "comparison";
+  comparisonId?: string;
+  outputMessageId?: string;
+  outputObjectId?: string;
+  createdAt: string;
+  completedAt: string;
+  metadata?: Record<string, unknown>;
+};

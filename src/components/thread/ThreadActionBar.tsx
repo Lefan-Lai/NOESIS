@@ -15,6 +15,7 @@ type ThreadActionBarProps = {
   onDiscard: () => void;
   onDelete: () => void;
   disabled?: boolean;
+  noteActionsEnabled?: boolean;
 };
 
 export function ThreadActionBar({
@@ -23,13 +24,21 @@ export function ThreadActionBar({
   onMerge,
   onDiscard,
   onDelete,
-  disabled
+  disabled,
+  noteActionsEnabled
 }: ThreadActionBarProps) {
+  const noteDisabled = disabled && !noteActionsEnabled;
+
   return (
     <div className="flex flex-wrap gap-2 border-t border-line p-3">
+      {disabled && (
+        <div className="basis-full text-xs font-semibold text-muted">
+          Phase 4: note actions are active; merge, discard, and delete remain guarded.
+        </div>
+      )}
       <button
         onClick={onKeep}
-        disabled={disabled}
+        disabled={noteDisabled}
         className="flex h-9 items-center gap-2 rounded-md border border-green-200 bg-green-50 px-3 text-xs font-semibold text-atlasGreen disabled:opacity-50"
       >
         <CheckCircle2 size={16} />
@@ -37,7 +46,7 @@ export function ThreadActionBar({
       </button>
       <button
         onClick={onAddContextNote}
-        disabled={disabled}
+        disabled={noteDisabled}
         className="flex h-9 items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 text-xs font-semibold text-amber-700 disabled:opacity-50"
         title="Write a context note that will be considered by future LLM calls."
       >

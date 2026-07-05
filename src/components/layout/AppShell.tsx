@@ -5,8 +5,10 @@ import { AppHeader } from "./AppHeader";
 import { MainDocumentPanel } from "@/components/document/MainDocumentPanel";
 import { SideThreadPanel } from "@/components/thread/SideThreadPanel";
 import { ArgumentEvidenceComparison } from "@/components/comparison/ArgumentEvidenceComparison";
+import { RevisionBranchPanel } from "@/components/branch/RevisionBranchPanel";
 import { VersionTimeline } from "@/components/timeline/VersionTimeline";
 import { DiffModal } from "@/components/diff/DiffModal";
+import { MergeModal } from "@/components/merge/MergeModal";
 import { ContextDebugPanel } from "@/components/debug/ContextDebugPanel";
 import { UtilityPanel } from "./UtilityPanel";
 import { useAnswerAtlasStore } from "@/store/useAnswerAtlasStore";
@@ -27,6 +29,9 @@ export function AppShell({ documentId }: AppShellProps) {
   );
   const restoreSideThread = useAnswerAtlasStore((state) => state.restoreSideThread);
   const selectedThreadId = useAnswerAtlasStore((state) => state.selectedThreadId);
+  const activeRevisionBranchId = useAnswerAtlasStore(
+    (state) => state.activeRevisionBranchId
+  );
   const threads = useAnswerAtlasStore((state) => state.threads);
   const discardThread = useAnswerAtlasStore((state) => state.discardThread);
   const deleteAnswer = useAnswerAtlasStore((state) => state.deleteAnswer);
@@ -75,12 +80,17 @@ export function AppShell({ documentId }: AppShellProps) {
         >
           <MainDocumentPanel documentId={documentId || currentDocumentId || ""} />
           {sideThreadVisible && <SideThreadPanel />}
-          <ArgumentEvidenceComparison />
+          {activeRevisionBranchId ? (
+            <RevisionBranchPanel />
+          ) : (
+            <ArgumentEvidenceComparison />
+          )}
           <VersionTimeline />
         </div>
         <ContextDebugPanel />
         <UtilityPanel />
         <DiffModal />
+        <MergeModal />
       </div>
     </div>
   );

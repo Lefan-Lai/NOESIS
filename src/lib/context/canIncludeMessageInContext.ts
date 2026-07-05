@@ -13,6 +13,10 @@ export function canIncludeMessageInContext(
     return false;
   }
 
+  if (thread.status === "discarded") {
+    return false;
+  }
+
   if (thread.contextPolicy === "exclude") {
     return false;
   }

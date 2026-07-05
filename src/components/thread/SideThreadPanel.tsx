@@ -24,6 +24,11 @@ export function SideThreadPanel() {
   const threads = useAnswerAtlasStore((state) => state.threads);
   const messages = useAnswerAtlasStore((state) => state.messages);
   const annotations = useAnswerAtlasStore((state) => state.annotations);
+  const revisionAnnotations = useAnswerAtlasStore(
+    (state) => state.revisionAnnotations
+  );
+  const textSelections = useAnswerAtlasStore((state) => state.textSelections);
+  const documentVersions = useAnswerAtlasStore((state) => state.documentVersions);
   const windows = useAnswerAtlasStore((state) => state.windows);
   const availableModels = useAnswerAtlasStore((state) => state.availableModels);
   const setWindowModel = useAnswerAtlasStore((state) => state.setWindowModel);
@@ -52,6 +57,9 @@ export function SideThreadPanel() {
   );
   const keepAsNote = useAnswerAtlasStore((state) => state.keepAsNote);
   const requestMerge = useAnswerAtlasStore((state) => state.requestMerge);
+  const requestMergeFromSelection = useAnswerAtlasStore(
+    (state) => state.requestMergeFromSelection
+  );
   const discardThread = useAnswerAtlasStore((state) => state.discardThread);
   const deleteAnswer = useAnswerAtlasStore((state) => state.deleteAnswer);
   const closeSideThread = useAnswerAtlasStore((state) => state.closeSideThread);
@@ -88,6 +96,49 @@ export function SideThreadPanel() {
             new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
         ),
     [annotations, selectedAnchorId]
+  );
+  const relatedRevisionNotes = useMemo(() => {
+    if (!thread) {
+      return [];
+    }
+
+    const scopeIds = new Set(
+      [
+        thread.sourceSelectionId,
+        thread.sourceLocalSelectionId,
+        thread.revisionLocalThreadId
+      ].filter(Boolean)
+    );
+
+    return Object.values(revisionAnnotations)
+      .filter(
+        (annotation) =>
+          scopeIds.has(annotation.scopeId ?? annotation.scopeObjectId) ||
+          annotation.sourceLocalThreadId === thread.revisionLocalThreadId ||
+          annotation.sourceLocalSelectionId === thread.sourceLocalSelectionId
+      )
+      .sort(
+        (a, b) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+  }, [revisionAnnotations, thread]);
+  const sourceSelection = thread?.sourceSelectionId
+    ? textSelections[thread.sourceSelectionId]
+    : undefined;
+  const sourceDocumentVersion = sourceSelection?.sourceDocumentVersionId
+    ? documentVersions[sourceSelection.sourceDocumentVersionId]
+    : undefined;
+  const activeDocumentVersion = useMemo(
+    () =>
+      Object.values(documentVersions)
+        .filter((version) => version.status === "active")
+        .sort((a, b) => (b.versionNumber ?? 0) - (a.versionNumber ?? 0))[0],
+    [documentVersions]
+  );
+  const isOlderSourceVersion = Boolean(
+    sourceDocumentVersion &&
+      activeDocumentVersion &&
+      sourceDocumentVersion.id !== activeDocumentVersion.id
   );
   const shouldShowContextNotesPanel =
     Boolean(thread && anchor && selectedText) &&
@@ -138,7 +189,8 @@ export function SideThreadPanel() {
       ...selection,
       createdFromWindowId: branchWindow?.id,
       sourceThreadId: thread?.id,
-      sourceMessageId: message.id
+      sourceMessageId: message.revisionMessageId ?? selection.sourceMessageId,
+      sourceAnswerId: message.revisionMessageId ?? selection.sourceAnswerId
     };
   }
 
@@ -227,12 +279,25 @@ export function SideThreadPanel() {
                 {anchor.anchorType === "text_selection"
                   ? "Selected Text"
                   : `Anchor: ${getAnchorDisplayLabel(anchor.blockId)}`}
+                {sourceSelection?.anchorStatus === "needs_review" && (
+                  <span className="rounded-full border border-orange-200 bg-orange-50 px-2 py-0.5 text-xs font-semibold text-orange-700">
+                    Selection anchor needs review
+                  </span>
+                )}
                 {thread && (
                   <span className="rounded-full border border-line bg-slate-50 px-2 py-0.5 text-xs font-semibold text-muted">
                     {thread.status.replaceAll("_", " ")}
                   </span>
                 )}
               </div>
+              {isOlderSourceVersion && (
+                <div className="mb-4 rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-xs leading-5 text-orange-800">
+                  This local thread was created from an older document version.
+                  Source version {sourceDocumentVersion?.versionNumber ?? "?"};
+                  active version {activeDocumentVersion?.versionNumber ?? "?"}.
+                  Original selected text: {sourceSelection?.selectedText}
+                </div>
+              )}
               <div className="mb-5 rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-sm leading-6 text-slate-700">
                 <div className="mb-1 text-xs font-bold uppercase tracking-wide text-atlasBlue">
                   {anchor.anchorType === "text_selection"
@@ -294,8 +359,12 @@ export function SideThreadPanel() {
                     <ThreadMessageCard
                       key={message.id}
                       message={message}
+                      sourceLocalThreadId={thread?.revisionLocalThreadId}
+                      parentSelectionId={thread?.sourceSelectionId}
+                      parentLocalSelectionId={thread?.sourceLocalSelectionId}
+                      sourceThreadType={thread?.revisionThreadType ?? "local"}
                       onAskAboutThis={(selection) =>
-                        openSelectionBranch(nestedSelection(selection, message), "ask")
+                        openSelectionBranch(nestedSelection(selection, message), "revise")
                       }
                       onReviseThis={(selection) =>
                         openSelectionBranch(nestedSelection(selection, message), "revise")
@@ -304,6 +373,9 @@ export function SideThreadPanel() {
                         openSelectionBranch(nestedSelection(selection, message), "branch")
                       }
                       onAddNote={(selection) => handleNestedNote(selection, message)}
+                      onMergeSelection={(selection) =>
+                        requestMergeFromSelection(nestedSelection(selection, message))
+                      }
                     />
                   ))}
                   {showLocalThinking && (
@@ -339,6 +411,34 @@ export function SideThreadPanel() {
                     Revision Suggestion
                   </div>
                   {thread ? revisionSuggestions[thread.id] ?? "No revised sentence returned yet." : ""}
+                </div>
+              )}
+
+              {relatedRevisionNotes.length > 0 && (
+                <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-sm leading-6 text-slate-700">
+                  <div className="mb-2 flex items-center gap-2 font-bold text-amber-900">
+                    <MessageSquarePlus size={17} />
+                    Related Notes
+                  </div>
+                  <div className="space-y-2">
+                    {relatedRevisionNotes.map((note) => (
+                      <div
+                        key={note.id}
+                        className="rounded-md border border-amber-200 bg-white px-3 py-2"
+                      >
+                        <div className="mb-1 flex flex-wrap items-center gap-2 text-xs font-semibold text-amber-800">
+                          <span>{note.scopeType ?? note.scope}</span>
+                          <span>{note.sourceType ?? "manual_note"}</span>
+                          <span>{note.status}</span>
+                        </div>
+                        <div className="line-clamp-3 text-slate-700">
+                          {note.status === "deleted"
+                            ? "Deleted note tombstone"
+                            : note.content}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </>
@@ -424,7 +524,8 @@ export function SideThreadPanel() {
 
         {thread && (
           <ThreadActionBar
-            disabled={isDeleted}
+            disabled={false}
+            noteActionsEnabled
             onKeep={() => keepAsNote(thread.id)}
             onAddContextNote={() => setContextNotesOpen(true)}
             onMerge={() => requestMerge(thread.id)}

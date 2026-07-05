@@ -10,14 +10,14 @@ export function discardThread(
       ...thread,
       status: "discarded" as const,
       visibility: "hidden" as const,
-      contextPolicy: "include" as const,
+      contextPolicy: "exclude" as const,
       discardedAt: now,
       updatedAt: now
     },
     messages: messages.map((message) => ({
       ...message,
       contentState: "discarded_but_contextual" as const,
-      includeInContext: true
+      includeInContext: false
     }))
   };
 }

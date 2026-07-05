@@ -33,7 +33,7 @@ function cloneData() {
 }
 
 describe("Answer Atlas context and version rules", () => {
-  it("keeps discarded answers context-eligible on the active path", () => {
+  it("retains discarded answers but excludes them from context by default", () => {
     const state = cloneData();
     const thread = state.threads["thread-s4"];
     const messages = Object.values(state.messages).filter(
@@ -58,10 +58,13 @@ describe("Answer Atlas context and version rules", () => {
 
     expect(result.thread.status).toBe("discarded");
     expect(result.thread.visibility).toBe("hidden");
-    expect(result.thread.contextPolicy).toBe("include");
-    expect(result.messages.every((message) => message.includeInContext)).toBe(true);
+    expect(result.thread.contextPolicy).toBe("exclude");
+    expect(result.messages.every((message) => !message.includeInContext)).toBe(true);
     expect(
       preview.includedItems.some((item) => item.sourceId === "msg-s4-assistant")
+    ).toBe(false);
+    expect(
+      preview.excludedItems.some((item) => item.sourceId === "msg-s4-assistant")
     ).toBe(true);
   });
 

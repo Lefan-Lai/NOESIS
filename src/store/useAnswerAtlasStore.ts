@@ -1,6 +1,7 @@
 "use client";
 
 import { create } from "zustand";
+import { createJSONStorage, persist } from "zustand/middleware";
 import type { ArgumentComparison } from "@/types/comparison";
 import type {
   ConversationMessage,
@@ -23,7 +24,53 @@ import type {
 } from "@/types/thread";
 import type { Branch, VersionNode } from "@/types/version";
 import { buildContextPreview } from "@/lib/context/buildContextForLLM";
-import type { ContextPreview } from "@/types/context";
+import type {
+  BuildContextParams,
+  ContextPreview,
+  ContextSnapshot,
+  ContextSnapshotItem,
+  LLMCallRecord
+} from "@/types/context";
+import type {
+  DocumentVersionModel,
+  EventLogRecord,
+  MainConversationModel,
+  MessageModel,
+  RevisionTimelineEdge,
+  RevisionTimelineNode,
+  RevisionRepositoryState,
+  AnnotationModel,
+  TextSelectionModel,
+  LocalThreadModel,
+  LocalSelectionModel,
+  RevisionBranchModel,
+  MergeRecordModel,
+  MergeMode,
+  MergeSourceType,
+  ComparisonGraphModel,
+  ComparisonRunModel,
+  ComparisonExportModel,
+  ManualEditDraftModel,
+  ObjectStateTransitionModel,
+  TimelinePathModel,
+  RevertRecordModel,
+  ActionIdempotencyRecord,
+  MigrationJobModel,
+  MigrationBatchModel,
+  MigrationIssueModel,
+  BackfillRecordModel,
+  FeatureFlagModel,
+  WorkspaceIndexDefinition,
+  WorkspaceMetricRecord,
+  TimelineNodeProjectionModel,
+  TimelineGraphSnapshotModel,
+  ObjectRelationIndexModel,
+  ContextItemIndexModel,
+  ThreadSummaryModel,
+  DocumentChunkModel,
+  ContextBuildCacheModel
+} from "@/types/revision";
+import type { TextDiff } from "@/services/revision/DiffService";
 import { checkoutVersionNode } from "@/lib/version/checkoutVersionNode";
 import { computeActivePath, markActivePath } from "@/lib/version/computeActivePath";
 import { getBlocksVisibleAtVersion } from "@/lib/version/getBlocksVisibleAtVersion";
@@ -36,6 +83,23 @@ import {
 } from "@/lib/thread/mergeThread";
 import { createAnnotation, deleteAnnotation as deleteAnnotationModel } from "@/lib/thread/annotations";
 import { createGeneratedDocumentState } from "@/lib/document/createGeneratedDocument";
+import { createArgumentComparisonFromTexts } from "@/lib/comparison/createArgumentComparison";
+import { MainConversationRevisionService } from "@/services/revision/MainConversationRevisionService";
+import { revisionRepository } from "@/services/revision/revisionRepository";
+import { TextSelectionService } from "@/services/revision/TextSelectionService";
+import { LocalThreadService } from "@/services/revision/LocalThreadService";
+import { LocalSelectionService } from "@/services/revision/LocalSelectionService";
+import { RevisionBranchService } from "@/services/revision/RevisionBranchService";
+import { AnnotationService } from "@/services/revision/AnnotationService";
+import { DocumentVersionService } from "@/services/revision/DocumentVersionService";
+import { MergeService } from "@/services/revision/MergeService";
+import { ComparisonService } from "@/services/revision/ComparisonService";
+import { executeWorkspaceAction } from "@/services/revision/WorkspaceActionExecutor";
+import type {
+  ExecuteWorkspaceActionPayload,
+  ExecuteWorkspaceActionResult,
+  WorkspaceActionId
+} from "@/types/workspaceActions";
 
 type Records<T extends { id: string }> = Record<string, T>;
 
@@ -50,6 +114,8 @@ type ProjectSnapshot = {
   activeVersionNodeId: string | null;
   selectedAnchorId: string | null;
   selectedThreadId: string | null;
+  activeRevisionBranchId: string | null;
+  activeMergeRecordId: string | null;
   windows: Records<WindowInstance>;
   sessions: Records<ConversationSession>;
   conversationMessages: Records<ConversationMessage>;
@@ -59,11 +125,47 @@ type ProjectSnapshot = {
   threads: Records<LocalThread>;
   messages: Records<ThreadMessage>;
   annotations: Records<Annotation>;
+  revisionAnnotations: Records<AnnotationModel>;
   versionNodes: Records<VersionNode>;
   branches: Records<Branch>;
   comparisons: Records<ArgumentComparison>;
   snapshots: Records<VersionSnapshot>;
   tombstones: Records<DeletedAnswerTombstone>;
+  contextSnapshots: Records<ContextSnapshot>;
+  llmCallRecords: Records<LLMCallRecord>;
+  mainConversations: Records<MainConversationModel>;
+  revisionMessages: Records<MessageModel>;
+  documentVersions: Records<DocumentVersionModel>;
+  manualEditDrafts: Records<ManualEditDraftModel>;
+  textSelections: Records<TextSelectionModel>;
+  localThreads: Records<LocalThreadModel>;
+  localSelections: Records<LocalSelectionModel>;
+  revisionBranches: Records<RevisionBranchModel>;
+  mergeRecords: Records<MergeRecordModel>;
+  comparisonGraphs: Records<ComparisonGraphModel>;
+  comparisonRuns: Records<ComparisonRunModel>;
+  comparisonExports: Records<ComparisonExportModel>;
+  objectStateTransitions: Records<ObjectStateTransitionModel>;
+  timelinePaths: Records<TimelinePathModel>;
+  revertRecords: Records<RevertRecordModel>;
+  eventLogs: Records<EventLogRecord>;
+  timelineNodes: Records<RevisionTimelineNode>;
+  timelineEdges: Records<RevisionTimelineEdge>;
+  actionIdempotencyRecords: Records<ActionIdempotencyRecord>;
+  migrationJobs: Records<MigrationJobModel>;
+  migrationBatches: Records<MigrationBatchModel>;
+  migrationIssues: Records<MigrationIssueModel>;
+  backfillRecords: Records<BackfillRecordModel>;
+  featureFlags: Records<FeatureFlagModel>;
+  workspaceIndexes: Records<WorkspaceIndexDefinition>;
+  workspaceMetrics: Records<WorkspaceMetricRecord>;
+  timelineNodeProjections: Records<TimelineNodeProjectionModel>;
+  timelineGraphSnapshots: Records<TimelineGraphSnapshotModel>;
+  objectRelationIndex: Records<ObjectRelationIndexModel>;
+  contextItemIndex: Records<ContextItemIndexModel>;
+  threadSummaries: Records<ThreadSummaryModel>;
+  documentChunks: Records<DocumentChunkModel>;
+  contextBuildCaches: Records<ContextBuildCacheModel>;
   revisionSuggestions: Record<string, string>;
 };
 
@@ -80,9 +182,19 @@ export type TextSelectionInput = {
   endOffset: number;
   contextBefore: string;
   contextAfter: string;
+  textHash?: string;
+  conversationId?: string;
+  sourceType?: TextSelectionModel["sourceType"];
+  sourceId?: string;
+  sourceDocumentVersionId?: string;
   createdFromWindowId?: string;
   sourceThreadId?: string;
   sourceMessageId?: string;
+  sourceLocalThreadId?: string;
+  sourceAnswerId?: string;
+  parentSelectionId?: string;
+  parentLocalSelectionId?: string;
+  sourceThreadType?: "local" | "nested_local";
 };
 
 export type SelectionBranchMode = "ask" | "revise" | "branch";
@@ -191,6 +303,8 @@ function emptyProjectSnapshot(): ProjectSnapshot {
     activeVersionNodeId: null,
     selectedAnchorId: null,
     selectedThreadId: null,
+    activeRevisionBranchId: null,
+    activeMergeRecordId: null,
     windows: conversationState.windows,
     sessions: conversationState.sessions,
     conversationMessages: {},
@@ -200,11 +314,47 @@ function emptyProjectSnapshot(): ProjectSnapshot {
     threads: {},
     messages: {},
     annotations: {},
+    revisionAnnotations: {},
     versionNodes: {},
     branches: {},
     comparisons: {},
     snapshots: {},
     tombstones: {},
+    contextSnapshots: {},
+    llmCallRecords: {},
+    mainConversations: {},
+    revisionMessages: {},
+    documentVersions: {},
+    manualEditDrafts: {},
+    textSelections: {},
+    localThreads: {},
+    localSelections: {},
+    revisionBranches: {},
+    mergeRecords: {},
+    comparisonGraphs: {},
+    comparisonRuns: {},
+    comparisonExports: {},
+    objectStateTransitions: {},
+    timelinePaths: {},
+    revertRecords: {},
+    eventLogs: {},
+    timelineNodes: {},
+    timelineEdges: {},
+    actionIdempotencyRecords: {},
+    migrationJobs: {},
+    migrationBatches: {},
+    migrationIssues: {},
+    backfillRecords: {},
+    featureFlags: {},
+    workspaceIndexes: {},
+    workspaceMetrics: {},
+    timelineNodeProjections: {},
+    timelineGraphSnapshots: {},
+    objectRelationIndex: {},
+    contextItemIndex: {},
+    threadSummaries: {},
+    documentChunks: {},
+    contextBuildCaches: {},
     revisionSuggestions: {}
   };
 }
@@ -217,6 +367,8 @@ function captureProjectSnapshot(state: AnswerAtlasState): ProjectSnapshot {
     activeVersionNodeId: state.activeVersionNodeId,
     selectedAnchorId: state.selectedAnchorId,
     selectedThreadId: state.selectedThreadId,
+    activeRevisionBranchId: state.activeRevisionBranchId,
+    activeMergeRecordId: state.activeMergeRecordId,
     windows: state.windows,
     sessions: state.sessions,
     conversationMessages: state.conversationMessages,
@@ -226,11 +378,47 @@ function captureProjectSnapshot(state: AnswerAtlasState): ProjectSnapshot {
     threads: state.threads,
     messages: state.messages,
     annotations: state.annotations,
+    revisionAnnotations: state.revisionAnnotations,
     versionNodes: state.versionNodes,
     branches: state.branches,
     comparisons: state.comparisons,
     snapshots: state.snapshots,
     tombstones: state.tombstones,
+    contextSnapshots: state.contextSnapshots,
+    llmCallRecords: state.llmCallRecords,
+    mainConversations: state.mainConversations,
+    revisionMessages: state.revisionMessages,
+    documentVersions: state.documentVersions,
+    manualEditDrafts: state.manualEditDrafts,
+    textSelections: state.textSelections,
+    localThreads: state.localThreads,
+    localSelections: state.localSelections,
+    revisionBranches: state.revisionBranches,
+    mergeRecords: state.mergeRecords,
+    comparisonGraphs: state.comparisonGraphs,
+    comparisonRuns: state.comparisonRuns,
+    comparisonExports: state.comparisonExports,
+    objectStateTransitions: state.objectStateTransitions,
+    timelinePaths: state.timelinePaths,
+    revertRecords: state.revertRecords,
+    eventLogs: state.eventLogs,
+    timelineNodes: state.timelineNodes,
+    timelineEdges: state.timelineEdges,
+    actionIdempotencyRecords: state.actionIdempotencyRecords,
+    migrationJobs: state.migrationJobs,
+    migrationBatches: state.migrationBatches,
+    migrationIssues: state.migrationIssues,
+    backfillRecords: state.backfillRecords,
+    featureFlags: state.featureFlags,
+    workspaceIndexes: state.workspaceIndexes,
+    workspaceMetrics: state.workspaceMetrics,
+    timelineNodeProjections: state.timelineNodeProjections,
+    timelineGraphSnapshots: state.timelineGraphSnapshots,
+    objectRelationIndex: state.objectRelationIndex,
+    contextItemIndex: state.contextItemIndex,
+    threadSummaries: state.threadSummaries,
+    documentChunks: state.documentChunks,
+    contextBuildCaches: state.contextBuildCaches,
     revisionSuggestions: state.revisionSuggestions
   };
 }
@@ -247,7 +435,11 @@ function applyProjectSnapshot(
     contextPreview: null,
     isSideThreadOpen: false,
     isSideThreadMinimized: false,
-    isGeneratingComparison: false
+    isGeneratingComparison: false,
+    pendingMergeDiff: null,
+    mergeConflictMessage: null,
+    activeRevisionBranchId: snapshot.activeRevisionBranchId ?? null,
+    activeMergeRecordId: snapshot.activeMergeRecordId ?? null
   };
 }
 
@@ -260,6 +452,8 @@ export type AnswerAtlasState = {
   activeVersionNodeId: string | null;
   selectedAnchorId: string | null;
   selectedThreadId: string | null;
+  activeRevisionBranchId: string | null;
+  activeMergeRecordId: string | null;
   windows: Records<WindowInstance>;
   sessions: Records<ConversationSession>;
   conversationMessages: Records<ConversationMessage>;
@@ -268,15 +462,53 @@ export type AnswerAtlasState = {
   anchors: Records<Anchor>;
   threads: Records<LocalThread>;
   messages: Records<ThreadMessage>;
-  annotations: Records<Annotation>;
+    annotations: Records<Annotation>;
+  revisionAnnotations: Records<AnnotationModel>;
   versionNodes: Records<VersionNode>;
   branches: Records<Branch>;
   comparisons: Records<ArgumentComparison>;
   snapshots: Records<VersionSnapshot>;
   tombstones: Records<DeletedAnswerTombstone>;
+  contextSnapshots: Records<ContextSnapshot>;
+  llmCallRecords: Records<LLMCallRecord>;
+  mainConversations: Records<MainConversationModel>;
+  revisionMessages: Records<MessageModel>;
+  documentVersions: Records<DocumentVersionModel>;
+  manualEditDrafts: Records<ManualEditDraftModel>;
+  textSelections: Records<TextSelectionModel>;
+  localThreads: Records<LocalThreadModel>;
+  localSelections: Records<LocalSelectionModel>;
+  revisionBranches: Records<RevisionBranchModel>;
+  mergeRecords: Records<MergeRecordModel>;
+  comparisonGraphs: Records<ComparisonGraphModel>;
+  comparisonRuns: Records<ComparisonRunModel>;
+  comparisonExports: Records<ComparisonExportModel>;
+  objectStateTransitions: Records<ObjectStateTransitionModel>;
+  timelinePaths: Records<TimelinePathModel>;
+  revertRecords: Records<RevertRecordModel>;
+  eventLogs: Records<EventLogRecord>;
+  timelineNodes: Records<RevisionTimelineNode>;
+  timelineEdges: Records<RevisionTimelineEdge>;
+  actionIdempotencyRecords: Records<ActionIdempotencyRecord>;
+  migrationJobs: Records<MigrationJobModel>;
+  migrationBatches: Records<MigrationBatchModel>;
+  migrationIssues: Records<MigrationIssueModel>;
+  backfillRecords: Records<BackfillRecordModel>;
+  featureFlags: Records<FeatureFlagModel>;
+  workspaceIndexes: Records<WorkspaceIndexDefinition>;
+  workspaceMetrics: Records<WorkspaceMetricRecord>;
+  timelineNodeProjections: Records<TimelineNodeProjectionModel>;
+  timelineGraphSnapshots: Records<TimelineGraphSnapshotModel>;
+  objectRelationIndex: Records<ObjectRelationIndexModel>;
+  contextItemIndex: Records<ContextItemIndexModel>;
+  threadSummaries: Records<ThreadSummaryModel>;
+  documentChunks: Records<DocumentChunkModel>;
+  contextBuildCaches: Records<ContextBuildCacheModel>;
   showContextDebugPanel: boolean;
   isDiffModalOpen: boolean;
   pendingPatch: PatchOperation[];
+  pendingMergeDiff: TextDiff | null;
+  mergeConflictMessage: string | null;
   contextPreview: ContextPreview | null;
   availableModels: string[];
   selectedModel: string;
@@ -312,12 +544,39 @@ export type AnswerAtlasState = {
   minimizeSideThread: () => void;
   restoreSideThread: () => void;
   toggleComparisonExpanded: () => void;
+  closeRevisionBranchPanel: () => void;
+  saveRevisionBranchDraft: (branchId: string, draftContent: string) => void;
+  addBranchContextNote: (branchId: string, content: string) => void;
   setActiveUtilityPanel: (panel: AnswerAtlasState["activeUtilityPanel"]) => void;
   loadModels: () => Promise<void>;
   setSelectedModel: (model: string) => void;
   setWindowModel: (windowId: string, model: string) => void;
   generateDocumentFromPrompt: (prompt: string) => Promise<void>;
   regenerateMainAnswer: () => Promise<void>;
+  createManualEditDraft: () => string | null;
+  updateManualEditDraftContent: (draftId: string, content: string) => void;
+  previewManualEditDraftDiff: (
+    draftId: string,
+    content?: string
+  ) => TextDiff | null;
+  confirmManualEditDraft: (
+    draftId: string,
+    content?: string
+  ) =>
+    | {
+        ok: true;
+        diff: TextDiff;
+        documentVersionId: string;
+      }
+    | {
+        ok: false;
+        conflict: true;
+        baseDocumentVersionId: string;
+        activeDocumentVersionId?: string;
+        diffAgainstCurrent?: TextDiff;
+      }
+    | null;
+  cancelManualEditDraft: (draftId: string) => void;
   openSelectionBranch: (
     selection: TextSelectionInput,
     mode: SelectionBranchMode
@@ -329,12 +588,35 @@ export type AnswerAtlasState = {
   askLocalQuestion: (question: string) => Promise<void>;
   regenerateLocalQuestion: () => Promise<void>;
   askTreeQuestion: (question: string) => Promise<void>;
+  regenerateComparisonGraph: (comparisonId: string) => void;
+  clearComparisonGraph: (
+    comparisonId: string,
+    legacyComparisonId?: string
+  ) => void;
+  deleteComparisonGraph: (
+    comparisonId: string,
+    legacyComparisonId?: string
+  ) => void;
+  exportComparisonGraph: (comparisonId: string) => void;
+  executeRevisionAction: (
+    actionId: WorkspaceActionId,
+    payload: ExecuteWorkspaceActionPayload
+  ) => ExecuteWorkspaceActionResult;
   deleteThreadMessage: (messageId: string) => void;
   addAnnotation: (content: string) => void;
   deleteAnnotation: (annotationId: string) => void;
   keepAsNote: (threadId: string) => void;
   createBranch: (threadId: string) => void;
   requestMerge: (threadId: string) => void;
+  requestMergeFromSelection: (selection: TextSelectionInput) => void;
+  openMergeModalForSource: (
+    sourceType: MergeSourceType,
+    sourceId: string,
+    mergeMode?: MergeMode
+  ) => void;
+  setMergeMode: (mergeMode: MergeMode) => void;
+  setManualMergeTarget: (start: number, end: number) => void;
+  cancelActiveMerge: () => void;
   confirmMerge: () => void;
   closeDiffModal: () => void;
   discardThread: (threadId: string) => void;
@@ -346,6 +628,350 @@ export type AnswerAtlasState = {
 
 function makeIdSuffix() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function emptyContextPreview(): ContextPreview {
+  return {
+    includedItems: [],
+    excludedItems: [],
+    tokenEstimate: 0
+  };
+}
+
+function contextItemToSnapshotItem(item: {
+  id?: string;
+  type: string;
+  sourceId?: string;
+  text: string;
+  reason: string;
+}, index: number, included: boolean): ContextSnapshotItem {
+  return {
+    id: item.id ?? `ctx-custom-${index}`,
+    type: item.type,
+    sourceId: item.sourceId,
+    text: item.text,
+    reason: item.reason,
+    included
+  };
+}
+
+function contextPreviewToSnapshotItems(preview: ContextPreview) {
+  return {
+    includedItems: preview.includedItems.map((item, index) =>
+      contextItemToSnapshotItem(item, index, true)
+    ),
+    excludedItems: preview.excludedItems.map((item, index) =>
+      contextItemToSnapshotItem(item, index, false)
+    )
+  };
+}
+
+function customContextItemsToPreview(
+  contextItems: Array<{ type: string; text: string; reason: string }>
+): ContextPreview {
+  const includedItems = contextItems.map((item, index) =>
+    contextItemToSnapshotItem(item, index, true)
+  );
+
+  return {
+    includedItems: includedItems as never,
+    excludedItems: [],
+    tokenEstimate: Math.ceil(
+      includedItems.reduce((total, item) => total + item.text.length, 0) / 4
+    )
+  };
+}
+
+function createLLMTrace(params: {
+  suffix: string;
+  projectId: string;
+  callType: ContextSnapshot["callType"];
+  purpose: ContextSnapshot["purpose"];
+  model: string;
+  provider?: "openai" | "mock";
+  status: LLMCallRecord["status"];
+  prompt: string;
+  preview: ContextPreview;
+  windowId?: string;
+  sessionId?: string;
+  documentId?: string;
+  activeVersionNodeId?: string;
+  threadId?: string;
+  comparisonId?: string;
+  outputMessageId?: string;
+  outputObjectId?: string;
+  createdAt: string;
+  completedAt?: string;
+}) {
+  const llmCallId = `llm-call-${params.suffix}`;
+  const contextSnapshotId = `context-snapshot-${params.suffix}`;
+  const snapshotItems = contextPreviewToSnapshotItems(params.preview);
+  const completedAt = params.completedAt ?? new Date().toISOString();
+  const contextSnapshot: ContextSnapshot = {
+    id: contextSnapshotId,
+    llmCallId,
+    projectId: params.projectId,
+    callType: params.callType,
+    purpose: params.purpose,
+    model: params.model,
+    windowId: params.windowId,
+    sessionId: params.sessionId,
+    documentId: params.documentId,
+    activeVersionNodeId: params.activeVersionNodeId,
+    threadId: params.threadId,
+    comparisonId: params.comparisonId,
+    includedItems: snapshotItems.includedItems,
+    excludedItems: snapshotItems.excludedItems,
+    tokenEstimate: params.preview.tokenEstimate,
+    createdAt: completedAt
+  };
+  const llmCallRecord: LLMCallRecord = {
+    id: llmCallId,
+    projectId: params.projectId,
+    callType: params.callType,
+    purpose: params.purpose,
+    model: params.model,
+    provider: params.provider,
+    status: params.status,
+    prompt: params.prompt,
+    contextSnapshotId,
+    windowId: params.windowId,
+    sessionId: params.sessionId,
+    documentId: params.documentId,
+    activeVersionNodeId: params.activeVersionNodeId,
+    threadId: params.threadId,
+    comparisonId: params.comparisonId,
+    outputMessageId: params.outputMessageId,
+    outputObjectId: params.outputObjectId,
+    createdAt: params.createdAt,
+    completedAt
+  };
+
+  return {
+    contextSnapshot,
+    llmCallRecord
+  };
+}
+
+function revisionStateFromStore(state: AnswerAtlasState): RevisionRepositoryState {
+  return {
+    projects: Object.fromEntries(
+      Object.values(state.projects).map((project) => [
+        project.id,
+        {
+          id: project.id,
+          name: project.name,
+          status: "active" as const,
+          createdAt: project.snapshot.documents
+            ? Object.values(project.snapshot.documents)[0]?.createdAt ??
+              project.updatedAt
+            : project.updatedAt,
+          updatedAt: project.updatedAt
+        }
+      ])
+    ),
+    mainConversations: state.mainConversations,
+    revisionMessages: state.revisionMessages,
+    documentVersions: state.documentVersions,
+    manualEditDrafts: state.manualEditDrafts,
+    textSelections: state.textSelections,
+    localThreads: state.localThreads,
+    localSelections: state.localSelections,
+    annotations: state.revisionAnnotations,
+    revisionBranches: state.revisionBranches,
+    mergeRecords: state.mergeRecords,
+    comparisonGraphs: state.comparisonGraphs,
+    comparisonRuns: state.comparisonRuns,
+    comparisonExports: state.comparisonExports,
+    objectStateTransitions: state.objectStateTransitions,
+    timelinePaths: state.timelinePaths,
+    revertRecords: state.revertRecords,
+    eventLogs: state.eventLogs,
+    timelineNodes: state.timelineNodes,
+    timelineEdges: state.timelineEdges,
+    llmCallRecords: state.llmCallRecords,
+    contextSnapshots: state.contextSnapshots,
+    actionIdempotencyRecords: state.actionIdempotencyRecords ?? {},
+    migrationJobs: state.migrationJobs,
+    migrationBatches: state.migrationBatches,
+    migrationIssues: state.migrationIssues,
+    backfillRecords: state.backfillRecords,
+    featureFlags: state.featureFlags,
+    workspaceIndexes: state.workspaceIndexes,
+    workspaceMetrics: state.workspaceMetrics,
+    timelineNodeProjections: state.timelineNodeProjections,
+    timelineGraphSnapshots: state.timelineGraphSnapshots,
+    objectRelationIndex: state.objectRelationIndex,
+    contextItemIndex: state.contextItemIndex,
+    threadSummaries: state.threadSummaries,
+    documentChunks: state.documentChunks,
+    contextBuildCaches: state.contextBuildCaches
+  };
+}
+
+function revisionStorePatch(
+  state: RevisionRepositoryState
+): Pick<
+  AnswerAtlasState,
+  | "mainConversations"
+  | "revisionMessages"
+  | "documentVersions"
+  | "manualEditDrafts"
+  | "textSelections"
+  | "localThreads"
+  | "localSelections"
+  | "revisionAnnotations"
+  | "revisionBranches"
+  | "mergeRecords"
+  | "comparisonGraphs"
+  | "comparisonRuns"
+  | "comparisonExports"
+  | "objectStateTransitions"
+  | "timelinePaths"
+  | "revertRecords"
+  | "eventLogs"
+  | "timelineNodes"
+  | "timelineEdges"
+  | "llmCallRecords"
+  | "contextSnapshots"
+  | "actionIdempotencyRecords"
+  | "migrationJobs"
+  | "migrationBatches"
+  | "migrationIssues"
+  | "backfillRecords"
+  | "featureFlags"
+  | "workspaceIndexes"
+  | "workspaceMetrics"
+  | "timelineNodeProjections"
+  | "timelineGraphSnapshots"
+  | "objectRelationIndex"
+  | "contextItemIndex"
+  | "threadSummaries"
+  | "documentChunks"
+  | "contextBuildCaches"
+> {
+  return {
+    mainConversations: state.mainConversations,
+    revisionMessages: state.revisionMessages,
+    documentVersions: state.documentVersions,
+    manualEditDrafts: state.manualEditDrafts,
+    textSelections: state.textSelections,
+    localThreads: state.localThreads,
+    localSelections: state.localSelections,
+    revisionAnnotations: state.annotations,
+    revisionBranches: state.revisionBranches,
+    mergeRecords: state.mergeRecords,
+    comparisonGraphs: state.comparisonGraphs,
+    comparisonRuns: state.comparisonRuns,
+    comparisonExports: state.comparisonExports,
+    objectStateTransitions: state.objectStateTransitions,
+    timelinePaths: state.timelinePaths,
+    revertRecords: state.revertRecords,
+    eventLogs: state.eventLogs,
+    timelineNodes: state.timelineNodes,
+    timelineEdges: state.timelineEdges,
+    llmCallRecords: state.llmCallRecords,
+    contextSnapshots: state.contextSnapshots,
+    actionIdempotencyRecords: state.actionIdempotencyRecords,
+    migrationJobs: state.migrationJobs,
+    migrationBatches: state.migrationBatches,
+    migrationIssues: state.migrationIssues,
+    backfillRecords: state.backfillRecords,
+    featureFlags: state.featureFlags,
+    workspaceIndexes: state.workspaceIndexes,
+    workspaceMetrics: state.workspaceMetrics,
+    timelineNodeProjections: state.timelineNodeProjections,
+    timelineGraphSnapshots: state.timelineGraphSnapshots,
+    objectRelationIndex: state.objectRelationIndex,
+    contextItemIndex: state.contextItemIndex,
+    threadSummaries: state.threadSummaries,
+    documentChunks: state.documentChunks,
+    contextBuildCaches: state.contextBuildCaches
+  };
+}
+
+function activeDocumentVersionFromStore(
+  state: AnswerAtlasState,
+  conversationId?: string
+) {
+  return DocumentVersionService.getActiveDocumentVersion(
+    revisionStateFromStore(state),
+    state.currentProjectId,
+    conversationId
+  );
+}
+
+function syncRevisionFoundation(partial: Partial<RevisionRepositoryState>) {
+  if (typeof window === "undefined") {
+    revisionRepository.mergeState(partial);
+    return Promise.resolve();
+  }
+
+  revisionRepository.mergeState(partial);
+  return fetch("/api/revision/sync", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(partial)
+  })
+    .then(() => undefined)
+    .catch(() => {
+    // Local persistence remains authoritative for the MVP if server sync fails.
+    });
+}
+
+function latestRevisionTimelineNode(
+  state: AnswerAtlasState,
+  objectType: RevisionTimelineNode["targetObjectType"],
+  objectId: string
+) {
+  return Object.values(state.timelineNodes)
+    .filter(
+      (node) =>
+        node.targetObjectType === objectType &&
+        node.targetObjectId === objectId &&
+        node.status === "active"
+    )
+    .sort(
+      (a, b) =>
+        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+    )[0];
+}
+
+function defaultNoteScopeForThread(state: AnswerAtlasState, thread?: LocalThread) {
+  if (!thread) {
+    return {
+      scopeType: "project" as const,
+      scopeId: state.currentProjectId
+    };
+  }
+
+  if (thread.revisionThreadType === "nested_local" && thread.revisionLocalThreadId) {
+    return {
+      scopeType: "nested_local_thread" as const,
+      scopeId: thread.revisionLocalThreadId
+    };
+  }
+
+  if (thread.sourceSelectionId) {
+    return {
+      scopeType: "selected_text" as const,
+      scopeId: thread.sourceSelectionId
+    };
+  }
+
+  if (thread.revisionLocalThreadId) {
+    return {
+      scopeType: "local_thread" as const,
+      scopeId: thread.revisionLocalThreadId
+    };
+  }
+
+  return {
+    scopeType: "project" as const,
+    scopeId: state.currentProjectId
+  };
 }
 
 function addChildToParent(
@@ -537,6 +1163,9 @@ function createThreadForAnchor(
     selectedText: anchor.selectedText,
     parentThreadId: anchor.sourceThreadId,
     sourceMessageId: anchor.sourceMessageId,
+    sourceSelectionId: anchor.id,
+    revisionLocalThreadId: `local-thread-${anchor.id}`,
+    revisionThreadType: "local",
     relatedBranchId: null,
     createdAt: now,
     updatedAt: now
@@ -591,7 +1220,9 @@ function createThreadForAnchor(
 
 const initialConversationState = createDefaultConversationState();
 
-export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
+export const useAnswerAtlasStore = create<AnswerAtlasState>()(
+  persist(
+    (set, get) => ({
   currentProjectId: "default",
   projects: {
     default: {
@@ -607,6 +1238,8 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
   activeVersionNodeId: null,
   selectedAnchorId: null,
   selectedThreadId: null,
+  activeRevisionBranchId: null,
+  activeMergeRecordId: null,
   windows: initialConversationState.windows,
   sessions: initialConversationState.sessions,
   conversationMessages: {},
@@ -616,14 +1249,52 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
   threads: {},
   messages: {},
   annotations: {},
+  revisionAnnotations: {},
   versionNodes: {},
   branches: {},
   comparisons: {},
   snapshots: {},
   tombstones: {},
+  contextSnapshots: {},
+  llmCallRecords: {},
+  mainConversations: {},
+  revisionMessages: {},
+  documentVersions: {},
+  manualEditDrafts: {},
+  textSelections: {},
+  localThreads: {},
+  localSelections: {},
+  revisionBranches: {},
+  mergeRecords: {},
+  comparisonGraphs: {},
+  comparisonRuns: {},
+  comparisonExports: {},
+  objectStateTransitions: {},
+  timelinePaths: {},
+  revertRecords: {},
+  eventLogs: {},
+  timelineNodes: {},
+  timelineEdges: {},
+  actionIdempotencyRecords: {},
+  migrationJobs: {},
+  migrationBatches: {},
+  migrationIssues: {},
+  backfillRecords: {},
+  featureFlags: {},
+  workspaceIndexes: {},
+  workspaceMetrics: {},
+  timelineNodeProjections: {},
+  timelineGraphSnapshots: {},
+  objectRelationIndex: {},
+  contextItemIndex: {},
+  threadSummaries: {},
+  documentChunks: {},
+  contextBuildCaches: {},
   showContextDebugPanel: false,
   isDiffModalOpen: false,
   pendingPatch: [],
+  pendingMergeDiff: null,
+  mergeConflictMessage: null,
   contextPreview: null,
   availableModels: [DEFAULT_MODEL],
   selectedModel: DEFAULT_MODEL,
@@ -769,6 +1440,109 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
     set((state) => ({
       isComparisonExpanded: !state.isComparisonExpanded
     }));
+  },
+
+  closeRevisionBranchPanel: () => {
+    set({
+      activeRevisionBranchId: null
+    });
+  },
+
+  saveRevisionBranchDraft: (branchId, draftContent) => {
+    let revisionSync: Partial<RevisionRepositoryState> | null = null;
+
+    set((state) => {
+      const branch = state.revisionBranches[branchId];
+
+      if (!branch) {
+        return state;
+      }
+
+      const updatedBranch: RevisionBranchModel = {
+        ...branch,
+        draftContent,
+        updatedAt: new Date().toISOString(),
+        payload: {
+          ...branch.payload,
+          draft_content: draftContent
+        }
+      };
+      const revisionBranches = {
+        ...state.revisionBranches,
+        [branchId]: updatedBranch
+      };
+
+      revisionSync = {
+        revisionBranches
+      };
+
+      return {
+        ...state,
+        revisionBranches
+      };
+    });
+
+    if (revisionSync) {
+      void syncRevisionFoundation(revisionSync);
+    }
+  },
+
+  addBranchContextNote: (branchId, content) => {
+    let revisionSync: Partial<RevisionRepositoryState> | null = null;
+
+    set((state) => {
+      const branch = state.revisionBranches[branchId];
+
+      if (!branch || !content.trim()) {
+        return state;
+      }
+
+      const now = new Date().toISOString();
+      const suffix = makeIdSuffix();
+      const sourceNode = latestRevisionTimelineNode(
+        state,
+        "revision_branch",
+        branch.id
+      );
+      const result = AnnotationService.createAnnotationFromManualNote({
+        state: revisionStateFromStore(state),
+        projectId: state.currentProjectId,
+        content,
+        title: "Branch context note",
+        scopeType: "branch",
+        scopeId: branch.id,
+        sourceType: "branch_draft",
+        sourceId: branch.id,
+        sourceText: branch.draftContent ?? branch.content ?? "",
+        sourceSelectionId: branch.parentSelectionId,
+        sourceLocalSelectionId: branch.parentLocalSelectionId,
+        sourceLocalThreadId: branch.sourceLocalThreadId,
+        sourceBranchId: branch.id,
+        sourceDocumentVersionId: branch.baseDocumentVersionId,
+        sourceTimelineNodeId: sourceNode?.id,
+        now,
+        suffix
+      });
+
+      revisionSync = {
+        annotations: result.state.annotations,
+        eventLogs: result.state.eventLogs,
+        timelineNodes: result.state.timelineNodes,
+        timelineEdges: result.state.timelineEdges
+      };
+
+      return {
+        ...state,
+        revisionAnnotations: result.state.annotations,
+        eventLogs: result.state.eventLogs,
+        timelineNodes: result.state.timelineNodes,
+        timelineEdges: result.state.timelineEdges
+      };
+    });
+
+    if (revisionSync) {
+      void syncRevisionFoundation(revisionSync);
+    }
   },
 
   setActiveUtilityPanel: (panel) => {
@@ -922,23 +1696,43 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
         state.conversationMessages,
         mainSession?.id
       );
-      const contextItems =
-        state.currentDocumentId && state.activeVersionNodeId
-          ? buildContextPreview(
-              {
-                documentId: state.currentDocumentId,
-                activeVersionNodeId: state.activeVersionNodeId,
-                purpose: "general_followup"
-              },
-              state
-            ).includedItems.map((item) => ({
-              type: item.type,
-              text: item.text,
-              reason: item.reason
-            }))
-          : [];
       const now = new Date().toISOString();
       const suffix = makeIdSuffix();
+      const activeDocument = state.currentDocumentId
+        ? state.documents[state.currentDocumentId]
+        : undefined;
+      const activeDocumentVersion = activeDocumentVersionFromStore(
+        state,
+        mainSession?.id ?? DEFAULT_MAIN_SESSION_ID
+      );
+      const startedRevision = MainConversationRevisionService.createStartedMainSend({
+        state: revisionStateFromStore(state),
+        projectId: state.currentProjectId,
+        projectName: state.projects[state.currentProjectId]?.name,
+        conversationId: mainSession?.id ?? DEFAULT_MAIN_SESSION_ID,
+        conversationTitle: mainWindow?.title,
+        prompt,
+        model,
+        documentId: activeDocument?.id,
+        activeDocumentVersion,
+        activeVersionNodeId: state.activeVersionNodeId ?? undefined,
+        recentMessages: Object.values(state.revisionMessages).filter(
+          (message) =>
+            message.projectId === state.currentProjectId &&
+            message.conversationId ===
+              (mainSession?.id ?? DEFAULT_MAIN_SESSION_ID) &&
+            message.status !== "deleted"
+        ),
+        now,
+        suffix
+      });
+      const contextItems = startedRevision.contextSnapshot.includedItems.map(
+        (item) => ({
+          type: item.type,
+          text: item.text,
+          reason: item.reason
+        })
+      );
       const userConversationMessage: ConversationMessage = {
         id: `conv-user-${suffix}`,
         sessionId: mainSession?.id ?? DEFAULT_MAIN_SESSION_ID,
@@ -954,8 +1748,29 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
         conversationMessages: {
           ...current.conversationMessages,
           [userConversationMessage.id]: userConversationMessage
-        }
+        },
+        mainConversations: startedRevision.state.mainConversations,
+        revisionMessages: startedRevision.state.revisionMessages,
+        documentVersions: startedRevision.state.documentVersions,
+        manualEditDrafts: startedRevision.state.manualEditDrafts,
+        eventLogs: startedRevision.state.eventLogs,
+        timelineNodes: startedRevision.state.timelineNodes,
+        timelineEdges: startedRevision.state.timelineEdges,
+        contextSnapshots: startedRevision.state.contextSnapshots,
+        llmCallRecords: startedRevision.state.llmCallRecords
       }));
+      syncRevisionFoundation({
+        projects: startedRevision.state.projects,
+        mainConversations: startedRevision.state.mainConversations,
+        revisionMessages: startedRevision.state.revisionMessages,
+        documentVersions: startedRevision.state.documentVersions,
+        manualEditDrafts: startedRevision.state.manualEditDrafts,
+        eventLogs: startedRevision.state.eventLogs,
+        timelineNodes: startedRevision.state.timelineNodes,
+        timelineEdges: startedRevision.state.timelineEdges,
+        contextSnapshots: startedRevision.state.contextSnapshots,
+        llmCallRecords: startedRevision.state.llmCallRecords
+      });
 
       const response = await fetch("/api/llm/generate-document", {
         method: "POST",
@@ -1015,6 +1830,25 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
         includeInContext: true,
         createdAt: assistantCreatedAt
       };
+      const completedRevision = MainConversationRevisionService.completeMainSend({
+        state: startedRevision.state,
+        projectId: state.currentProjectId,
+        conversationId: mainSession?.id ?? DEFAULT_MAIN_SESSION_ID,
+        prompt,
+        answer: assistantText,
+        model: data.model,
+        provider: data.provider,
+        llmCallId: startedRevision.llmCallRecord.id,
+        contextSnapshotId: startedRevision.contextSnapshot.id,
+        userMessageId: startedRevision.userMessage.id,
+        userTimelineNodeId: startedRevision.timelineNodes[0].id,
+        documentId: generated.document.id,
+        documentTitle: generated.document.title,
+        documentContent: generated.document.rawText,
+        now: assistantCreatedAt,
+        suffix
+      });
+      const completedRevisionState = completedRevision.state;
 
       set((current) => {
         const withConversation = appendConversationMessages({
@@ -1064,6 +1898,7 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
               threads: {},
               messages: {},
               annotations: {},
+              revisionAnnotations: {},
               versionNodes: {
                 [generated.versionNode.id]: generated.versionNode
               },
@@ -1080,10 +1915,31 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
 
         return {
           ...nextState,
+          mainConversations: completedRevisionState.mainConversations,
+          revisionMessages: completedRevisionState.revisionMessages,
+          documentVersions: completedRevisionState.documentVersions,
+          manualEditDrafts: completedRevisionState.manualEditDrafts,
+          eventLogs: completedRevisionState.eventLogs,
+          timelineNodes: completedRevisionState.timelineNodes,
+          timelineEdges: completedRevisionState.timelineEdges,
+          contextSnapshots: completedRevisionState.contextSnapshots,
+          llmCallRecords: completedRevisionState.llmCallRecords,
           llmProvider: data.provider,
           selectedModel: data.model,
           isGeneratingDocument: false
         };
+      });
+      syncRevisionFoundation({
+        projects: completedRevisionState.projects,
+        mainConversations: completedRevisionState.mainConversations,
+        revisionMessages: completedRevisionState.revisionMessages,
+        documentVersions: completedRevisionState.documentVersions,
+        manualEditDrafts: completedRevisionState.manualEditDrafts,
+        eventLogs: completedRevisionState.eventLogs,
+        timelineNodes: completedRevisionState.timelineNodes,
+        timelineEdges: completedRevisionState.timelineEdges,
+        contextSnapshots: completedRevisionState.contextSnapshots,
+        llmCallRecords: completedRevisionState.llmCallRecords
       });
     } catch {
       set({ isGeneratingDocument: false });
@@ -1113,7 +1969,221 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
     }
   },
 
+  createManualEditDraft: () => {
+    const state = get();
+    const mainWindow = state.windows[state.mainWindowId];
+    const mainSession = mainWindow
+      ? state.sessions[mainWindow.conversationSessionId]
+      : null;
+    const activeVersion = activeDocumentVersionFromStore(
+      state,
+      mainSession?.id ?? DEFAULT_MAIN_SESSION_ID
+    );
+
+    if (!activeVersion) {
+      return null;
+    }
+
+    const result = get().executeRevisionAction("document.edit", {
+      target: {
+        objectType: "document_version",
+        objectId: activeVersion.id,
+        projectId: state.currentProjectId,
+        conversationId: mainSession?.id ?? DEFAULT_MAIN_SESSION_ID,
+        status: activeVersion.status
+      },
+      projectId: state.currentProjectId,
+      conversationId: mainSession?.id ?? DEFAULT_MAIN_SESSION_ID,
+      content: activeVersion.content,
+      suffix: makeIdSuffix()
+    });
+
+    return result.status === "success"
+      ? (result.result as { draft?: ManualEditDraftModel }).draft?.id ?? null
+      : null;
+  },
+
+  updateManualEditDraftContent: (draftId, content) => {
+    const result = DocumentVersionService.updateManualEditDraft({
+      state: revisionStateFromStore(get()),
+      draftId,
+      content,
+      now: new Date().toISOString()
+    });
+
+    set((current) => ({
+      ...current,
+      manualEditDrafts: result.state.manualEditDrafts,
+      eventLogs: result.state.eventLogs,
+      timelineNodes: result.state.timelineNodes,
+      timelineEdges: result.state.timelineEdges
+    }));
+    void syncRevisionFoundation({
+      manualEditDrafts: result.state.manualEditDrafts,
+      eventLogs: result.state.eventLogs,
+      timelineNodes: result.state.timelineNodes,
+      timelineEdges: result.state.timelineEdges
+    });
+  },
+
+  previewManualEditDraftDiff: (draftId, content) => {
+    let revisionState = revisionStateFromStore(get());
+
+    if (content !== undefined) {
+      const updated = DocumentVersionService.updateManualEditDraft({
+        state: revisionState,
+        draftId,
+        content,
+        now: new Date().toISOString()
+      });
+      revisionState = updated.state;
+    }
+
+    if (content !== undefined) {
+      set((current) => ({
+        ...current,
+        ...revisionStorePatch(revisionState)
+      }));
+      void syncRevisionFoundation({
+        manualEditDrafts: revisionState.manualEditDrafts,
+        eventLogs: revisionState.eventLogs,
+        timelineNodes: revisionState.timelineNodes,
+        timelineEdges: revisionState.timelineEdges
+      });
+    }
+
+    const actionResult = get().executeRevisionAction("document.preview_diff", {
+      target: {
+        objectType: "manual_edit_draft",
+        objectId: draftId,
+        projectId: get().currentProjectId,
+        conversationId: get().manualEditDrafts[draftId]?.conversationId,
+        status: get().manualEditDrafts[draftId]?.status ?? "draft"
+      },
+      suffix: makeIdSuffix()
+    });
+
+    return actionResult.status === "success"
+      ? (actionResult.result as { diff?: TextDiff }).diff ?? null
+      : null;
+  },
+
+  confirmManualEditDraft: (draftId, content) => {
+    let revisionState = revisionStateFromStore(get());
+
+    if (content !== undefined) {
+      const updated = DocumentVersionService.updateManualEditDraft({
+        state: revisionState,
+        draftId,
+        content,
+        now: new Date().toISOString()
+      });
+      revisionState = updated.state;
+    }
+
+    if (content !== undefined) {
+      set((current) => ({
+        ...current,
+        ...revisionStorePatch(revisionState)
+      }));
+      void syncRevisionFoundation({
+        manualEditDrafts: revisionState.manualEditDrafts,
+        eventLogs: revisionState.eventLogs,
+        timelineNodes: revisionState.timelineNodes,
+        timelineEdges: revisionState.timelineEdges
+      });
+    }
+
+    const actionResult = get().executeRevisionAction("document.confirm_edit", {
+      target: {
+        objectType: "manual_edit_draft",
+        objectId: draftId,
+        projectId: get().currentProjectId,
+        conversationId: get().manualEditDrafts[draftId]?.conversationId,
+        status: get().manualEditDrafts[draftId]?.status ?? "ready_for_review"
+      },
+      confirmed: true,
+      diffAccepted: true,
+      suffix: makeIdSuffix()
+    });
+    const result = actionResult.status === "success"
+      ? (actionResult.result as ReturnType<typeof DocumentVersionService.confirmManualEdit>)
+      : null;
+
+    if (!result || !result.ok) {
+      return {
+        ok: false,
+        conflict: true,
+        baseDocumentVersionId:
+          result?.baseDocumentVersionId ??
+          get().manualEditDrafts[draftId]?.baseDocumentVersionId ??
+          draftId,
+        activeDocumentVersionId: result?.activeDocumentVersionId,
+        diffAgainstCurrent: result?.diffAgainstCurrent
+      };
+    }
+
+    set((current) => ({
+      ...current,
+      documents: current.currentDocumentId
+        && current.documents[current.currentDocumentId]
+        ? {
+            ...current.documents,
+            [current.currentDocumentId]: {
+              ...current.documents[current.currentDocumentId],
+              rawText: result.documentVersion.content,
+              updatedAt: result.documentVersion.createdAt
+            }
+          }
+        : current.documents,
+      documentVersions: result.state.documentVersions,
+      manualEditDrafts: result.state.manualEditDrafts,
+      textSelections: result.state.textSelections,
+      mainConversations: result.state.mainConversations,
+      eventLogs: result.state.eventLogs,
+      timelineNodes: result.state.timelineNodes,
+      timelineEdges: result.state.timelineEdges
+    }));
+    void syncRevisionFoundation({
+      projects: result.state.projects,
+      mainConversations: result.state.mainConversations,
+      documentVersions: result.state.documentVersions,
+      manualEditDrafts: result.state.manualEditDrafts,
+      textSelections: result.state.textSelections,
+      eventLogs: result.state.eventLogs,
+      timelineNodes: result.state.timelineNodes,
+      timelineEdges: result.state.timelineEdges
+    });
+
+    return {
+      ok: true,
+      diff: result.diff,
+      documentVersionId: result.documentVersion.id
+    };
+  },
+
+  cancelManualEditDraft: (draftId) => {
+    const draft = get().manualEditDrafts[draftId];
+
+    if (!draft || draft.status === "confirmed") {
+      return;
+    }
+
+    get().executeRevisionAction("document.cancel_edit", {
+      target: {
+        objectType: "manual_edit_draft",
+        objectId: draftId,
+        projectId: get().currentProjectId,
+        conversationId: draft.conversationId,
+        status: draft.status
+      },
+      suffix: makeIdSuffix()
+    });
+  },
+
   openSelectionBranch: (selection, mode) => {
+    let revisionSync: Partial<RevisionRepositoryState> | null = null;
+
     set((state) => {
       const documentId = state.currentDocumentId;
       const activeVersionNodeId = state.activeVersionNodeId;
@@ -1125,22 +2195,226 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
 
       const now = new Date().toISOString();
       const suffix = makeIdSuffix();
-      const anchorId = `selection-${suffix}`;
-      const nodeId = `v-selection-${suffix}`;
-      const anchor: Anchor = {
-        id: anchorId,
-        documentId,
+      const mainWindow = state.windows[state.mainWindowId];
+      const mainSession = mainWindow
+        ? state.sessions[mainWindow.conversationSessionId]
+        : null;
+      const sourceDocumentVersionId =
+        selection.sourceDocumentVersionId ?? `doc-version-${activeVersionNodeId}`;
+      const sourceType = selection.sourceType ?? "document_version";
+      const sourceId = selection.sourceId ?? sourceDocumentVersionId;
+      const isLocalAnswerSelection = Boolean(
+        selection.sourceLocalThreadId && selection.sourceAnswerId
+      );
+
+      if (isLocalAnswerSelection) {
+        const sourceLocalThreadId = selection.sourceLocalThreadId!;
+        const sourceAnswerId = selection.sourceAnswerId!;
+        const sourceLocalThread = state.localThreads[sourceLocalThreadId];
+        const parentSelectionId =
+          selection.parentSelectionId ?? sourceLocalThread?.sourceSelectionId;
+        const parentLocalSelectionId =
+          selection.parentLocalSelectionId ?? sourceLocalThread?.parentLocalSelectionId;
+        const localSelectionResult = LocalSelectionService.createOrGetLocalSelection({
+          state: revisionStateFromStore(state),
+          projectId: state.currentProjectId,
+          conversationId: selection.conversationId,
+          sourceLocalThreadId,
+          sourceMessageId: selection.sourceMessageId ?? sourceAnswerId,
+          sourceAnswerId,
+          parentSelectionId,
+          parentLocalSelectionId,
+          sourceDocumentVersionId,
+          selectedText: selection.selectedText,
+          startOffset: selection.startOffset,
+          endOffset: selection.endOffset,
+          beforeContext: selection.contextBefore,
+          afterContext: selection.contextAfter,
+          textHash: selection.textHash,
+          sourceThreadType:
+            selection.sourceThreadType ?? sourceLocalThread?.threadType ?? "local",
+          now,
+          suffix
+        });
+
+        if (mode === "branch") {
+          const branchResult = RevisionBranchService.createBranchFromLocalSelection({
+            state: localSelectionResult.state,
+            projectId: state.currentProjectId,
+            localSelectionId: localSelectionResult.localSelection.id,
+            baseDocumentVersionId: sourceDocumentVersionId,
+            now,
+            suffix
+          });
+
+          revisionSync = {
+            localSelections: branchResult.state.localSelections,
+            revisionBranches: branchResult.state.revisionBranches,
+            eventLogs: branchResult.state.eventLogs,
+            timelineNodes: branchResult.state.timelineNodes,
+            timelineEdges: branchResult.state.timelineEdges
+          };
+
+          return {
+            ...state,
+            activeRevisionBranchId: branchResult.branch.id,
+            localSelections: branchResult.state.localSelections,
+            revisionBranches: branchResult.state.revisionBranches,
+            eventLogs: branchResult.state.eventLogs,
+            timelineNodes: branchResult.state.timelineNodes,
+            timelineEdges: branchResult.state.timelineEdges
+          };
+        }
+
+        const nestedUiThreadId = `thread-${localSelectionResult.localSelection.id}`;
+        const nestedThreadResult =
+          LocalThreadService.getOrCreateNestedLocalThreadForLocalSelection({
+            state: localSelectionResult.state,
+            projectId: state.currentProjectId,
+            localSelectionId: localSelectionResult.localSelection.id,
+            conversationId: threadSessionId(nestedUiThreadId),
+            now,
+            suffix
+          });
+        const anchorId = localSelectionResult.localSelection.id;
+        const nodeId = `v-local-selection-${suffix}`;
+        const anchor: Anchor =
+          state.anchors[anchorId] ?? {
+            id: anchorId,
+            documentId,
+            selectedText: selection.selectedText,
+            anchorType: "text_selection",
+            startOffset: selection.startOffset,
+            endOffset: selection.endOffset,
+            contextBefore: selection.contextBefore,
+            contextAfter: selection.contextAfter,
+            createdFromWindowId: selection.createdFromWindowId,
+            sourceThreadId: selection.sourceThreadId,
+            sourceMessageId: sourceAnswerId,
+            createdAt: now
+          };
+        const node: VersionNode = {
+          id: nodeId,
+          documentId,
+          parentId: activeVersionNodeId,
+          childIds: [],
+          nodeType: "anchor_selected",
+          label: "Selected local text",
+          relatedAnchorId: anchorId,
+          isActivePath: true,
+          createdAt: now
+        };
+        let nextState = state.anchors[anchorId]
+          ? state
+          : appendVersionNodeAndCheckout(
+              {
+                ...state,
+                anchors: {
+                  ...state.anchors,
+                  [anchorId]: anchor
+                }
+              },
+              node
+            );
+        const threadId = createThreadForAnchor(nextState, anchor, nodeId);
+        const windowId = threadWindowId(threadId);
+
+        nextState = {
+          ...nextState,
+          activeRevisionBranchId: null,
+          threads: {
+            ...nextState.threads,
+            [threadId]: {
+              ...nextState.threads[threadId],
+              parentThreadId: selection.sourceThreadId,
+              sourceMessageId: sourceAnswerId,
+              sourceSelectionId: parentSelectionId,
+              sourceLocalSelectionId: localSelectionResult.localSelection.id,
+              revisionLocalThreadId: nestedThreadResult.localThread.id,
+              revisionThreadType: "nested_local",
+              selectedText: selection.selectedText,
+              updatedAt: now
+            }
+          },
+          windows: {
+            ...nextState.windows,
+            [windowId]: {
+              ...nextState.windows[windowId],
+              title: "Nested Local Window",
+              selectedBlockId: undefined,
+              contextScope: branchContextScope({
+                currentDocumentId: documentId
+              }),
+              updatedAt: now
+            }
+          },
+          selectedAnchorId: anchorId,
+          selectedThreadId: threadId,
+          isSideThreadOpen: true,
+          isSideThreadMinimized: false,
+          localSelections: nestedThreadResult.state.localSelections,
+          localThreads: nestedThreadResult.state.localThreads,
+          eventLogs: nestedThreadResult.state.eventLogs,
+          timelineNodes: nestedThreadResult.state.timelineNodes,
+          timelineEdges: nestedThreadResult.state.timelineEdges
+        };
+
+        revisionSync = {
+          localSelections: nestedThreadResult.state.localSelections,
+          localThreads: nestedThreadResult.state.localThreads,
+          eventLogs: nestedThreadResult.state.eventLogs,
+          timelineNodes: nestedThreadResult.state.timelineNodes,
+          timelineEdges: nestedThreadResult.state.timelineEdges
+        };
+
+        return nextState;
+      }
+
+      const textSelectionResult = TextSelectionService.createOrGetSelection({
+        state: revisionStateFromStore(state),
+        projectId: state.currentProjectId,
+        conversationId: selection.conversationId ?? mainSession?.id,
+        sourceType,
+        sourceId,
+        sourceDocumentVersionId,
+        sourceMessageId: selection.sourceMessageId,
         selectedText: selection.selectedText,
-        anchorType: "text_selection",
         startOffset: selection.startOffset,
         endOffset: selection.endOffset,
-        contextBefore: selection.contextBefore,
-        contextAfter: selection.contextAfter,
-        createdFromWindowId: selection.createdFromWindowId ?? state.mainWindowId,
-        sourceThreadId: selection.sourceThreadId,
-        sourceMessageId: selection.sourceMessageId,
-        createdAt: now
-      };
+        textHash: selection.textHash,
+        beforeContext: selection.contextBefore,
+        afterContext: selection.contextAfter,
+        activeTimelineNodeId: state.mainConversations[mainSession?.id ?? DEFAULT_MAIN_SESSION_ID]
+          ?.activeTimelineNodeId,
+        now,
+        suffix
+      });
+      const revisionLocalThreadId = `local-thread-${textSelectionResult.selection.id}`;
+      const localThreadResult = LocalThreadService.getOrCreateLocalThreadForSelection({
+        state: textSelectionResult.state,
+        projectId: state.currentProjectId,
+        selectionId: textSelectionResult.selection.id,
+        conversationId: threadSessionId(`thread-${textSelectionResult.selection.id}`),
+        now,
+        suffix
+      });
+      const anchorId = textSelectionResult.selection.id;
+      const nodeId = `v-selection-${suffix}`;
+      const anchor: Anchor =
+        state.anchors[anchorId] ?? {
+          id: anchorId,
+          documentId,
+          selectedText: selection.selectedText,
+          anchorType: "text_selection",
+          startOffset: selection.startOffset,
+          endOffset: selection.endOffset,
+          contextBefore: selection.contextBefore,
+          contextAfter: selection.contextAfter,
+          createdFromWindowId: selection.createdFromWindowId ?? state.mainWindowId,
+          sourceThreadId: selection.sourceThreadId,
+          sourceMessageId: selection.sourceMessageId,
+          createdAt: now
+        };
       const node: VersionNode = {
         id: nodeId,
         documentId,
@@ -1152,16 +2426,18 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
         isActivePath: true,
         createdAt: now
       };
-      let nextState = appendVersionNodeAndCheckout(
-        {
-          ...state,
-          anchors: {
-            ...state.anchors,
-            [anchorId]: anchor
-          }
-        },
-        node
-      );
+      let nextState = state.anchors[anchorId]
+        ? state
+        : appendVersionNodeAndCheckout(
+            {
+              ...state,
+              anchors: {
+                ...state.anchors,
+                [anchorId]: anchor
+              }
+            },
+            node
+          );
       const threadId = createThreadForAnchor(nextState, anchor, nodeId);
       const windowId = threadWindowId(threadId);
       const title =
@@ -1180,7 +2456,9 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
             sourceType: "text_selection",
             selectedText: selection.selectedText,
             parentThreadId: selection.sourceThreadId,
-            sourceMessageId: selection.sourceMessageId
+            sourceMessageId: selection.sourceMessageId,
+            sourceSelectionId: textSelectionResult.selection.id,
+            revisionLocalThreadId
           }
         },
         windows: {
@@ -1198,10 +2476,28 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
         selectedAnchorId: anchorId,
         selectedThreadId: threadId,
         isSideThreadOpen: true,
-        isSideThreadMinimized: false
+        isSideThreadMinimized: false,
+        textSelections: localThreadResult.state.textSelections,
+        localThreads: localThreadResult.state.localThreads,
+        eventLogs: localThreadResult.state.eventLogs,
+        timelineNodes: localThreadResult.state.timelineNodes,
+        timelineEdges: localThreadResult.state.timelineEdges
+      };
+
+      revisionSync = {
+        textSelections: localThreadResult.state.textSelections,
+        localThreads: localThreadResult.state.localThreads,
+        eventLogs: localThreadResult.state.eventLogs,
+        timelineNodes: localThreadResult.state.timelineNodes,
+        timelineEdges: localThreadResult.state.timelineEdges
       };
 
       if (mode !== "branch") {
+        return nextState;
+      }
+
+      // Full branch editing is intentionally deferred beyond Phase 2.
+      if (mode === "branch") {
         return nextState;
       }
 
@@ -1255,10 +2551,16 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
       );
     });
 
+    if (revisionSync) {
+      syncRevisionFoundation(revisionSync);
+    }
+
     get().refreshContextPreview();
   },
 
   addNoteForSelection: (selection, content) => {
+    let revisionSync: Partial<RevisionRepositoryState> | null = null;
+
     set((state) => {
       const documentId = state.currentDocumentId;
       const activeVersionNodeId = state.activeVersionNodeId;
@@ -1276,6 +2578,106 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
       const suffix = makeIdSuffix();
       const anchorId = `selection-note-${suffix}`;
       const annotationId = `annotation-${suffix}`;
+      let revisionState = revisionStateFromStore(state);
+      let revisionAnnotationResult: ReturnType<
+        typeof AnnotationService.createAnnotationFromManualNote
+      > | null = null;
+
+      if (selection.sourceLocalThreadId && selection.sourceAnswerId) {
+        const sourceLocalThread =
+          state.localThreads[selection.sourceLocalThreadId];
+        const localSelectionResult =
+          LocalSelectionService.createOrGetLocalSelection({
+            state: revisionState,
+            projectId: state.currentProjectId,
+            conversationId: selection.conversationId,
+            sourceLocalThreadId: selection.sourceLocalThreadId,
+            sourceMessageId: selection.sourceMessageId ?? selection.sourceAnswerId,
+            sourceAnswerId: selection.sourceAnswerId,
+            parentSelectionId:
+              selection.parentSelectionId ?? sourceLocalThread?.sourceSelectionId,
+            parentLocalSelectionId:
+              selection.parentLocalSelectionId ??
+              sourceLocalThread?.parentLocalSelectionId,
+            sourceDocumentVersionId: selection.sourceDocumentVersionId,
+            selectedText: selection.selectedText,
+            startOffset: selection.startOffset,
+            endOffset: selection.endOffset,
+            beforeContext: selection.contextBefore,
+            afterContext: selection.contextAfter,
+            textHash: selection.textHash,
+            sourceThreadType:
+              selection.sourceThreadType ??
+              sourceLocalThread?.threadType ??
+              "local",
+            now,
+            suffix
+          });
+        const localSelection = localSelectionResult.localSelection;
+        const scopeType =
+          localSelection.sourceThreadType === "nested_local"
+            ? ("local_thread" as const)
+            : ("selected_text" as const);
+        const scopeId =
+          localSelection.sourceThreadType === "nested_local"
+            ? localSelection.sourceLocalThreadId
+            : localSelection.parentSelectionId ?? localSelection.id;
+        const sourceNode = latestRevisionTimelineNode(
+          {
+            ...state,
+            localSelections: localSelectionResult.state.localSelections,
+            eventLogs: localSelectionResult.state.eventLogs,
+            timelineNodes: localSelectionResult.state.timelineNodes,
+            timelineEdges: localSelectionResult.state.timelineEdges
+          },
+          "local_selection",
+          localSelection.id
+        );
+
+        revisionAnnotationResult =
+          AnnotationService.createAnnotationFromLocalSelection({
+            state: localSelectionResult.state,
+            projectId: state.currentProjectId,
+            conversationId: selection.conversationId,
+            content,
+            title: "Kept selected fragment",
+            scopeType,
+            scopeId,
+            sourceId: localSelection.id,
+            sourceText: localSelection.selectedText,
+            sourceMessageId: localSelection.sourceMessageId,
+            sourceSelectionId: localSelection.parentSelectionId,
+            sourceLocalSelectionId: localSelection.id,
+            sourceLocalThreadId: localSelection.sourceLocalThreadId,
+            sourceDocumentVersionId: localSelection.sourceDocumentVersionId,
+            sourceTimelineNodeId: sourceNode?.id,
+            now,
+            suffix: `${suffix}-note`
+          });
+        revisionState = revisionAnnotationResult.state;
+      } else {
+        const scopeType = "selected_text" as const;
+        const scopeId = selection.sourceId ?? anchorId;
+
+        revisionAnnotationResult =
+          AnnotationService.createAnnotationFromManualNote({
+            state: revisionState,
+            projectId: state.currentProjectId,
+            conversationId: selection.conversationId,
+            content,
+            title: "Selection context note",
+            scopeType,
+            scopeId,
+            sourceId: selection.sourceId,
+            sourceText: selection.selectedText,
+            sourceMessageId: selection.sourceMessageId,
+            sourceSelectionId: scopeId,
+            sourceDocumentVersionId: selection.sourceDocumentVersionId,
+            now,
+            suffix: `${suffix}-note`
+          });
+        revisionState = revisionAnnotationResult.state;
+      }
       const anchor: Anchor = {
         id: anchorId,
         documentId,
@@ -1315,6 +2717,14 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
         createdAt: now
       };
 
+      revisionSync = {
+        localSelections: revisionState.localSelections,
+        annotations: revisionState.annotations,
+        eventLogs: revisionState.eventLogs,
+        timelineNodes: revisionState.timelineNodes,
+        timelineEdges: revisionState.timelineEdges
+      };
+
       return appendVersionNodeAndCheckout(
         {
           ...state,
@@ -1325,11 +2735,20 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
           annotations: {
             ...state.annotations,
             [annotationId]: annotation
-          }
+          },
+          localSelections: revisionState.localSelections,
+          revisionAnnotations: revisionState.annotations,
+          eventLogs: revisionState.eventLogs,
+          timelineNodes: revisionState.timelineNodes,
+          timelineEdges: revisionState.timelineEdges
         },
         node
       );
     });
+
+    if (revisionSync) {
+      void syncRevisionFoundation(revisionSync);
+    }
 
     get().refreshContextPreview();
   },
@@ -1463,153 +2882,204 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
     const window = state.windows[threadWindowId(threadId)];
     const session = window ? state.sessions[window.conversationSessionId] : null;
     const model = window?.modelConfigId ?? state.selectedModel;
+    const revisionLocalThreadId =
+      thread?.revisionLocalThreadId ?? (anchor ? `local-thread-${anchor.id}` : null);
 
-    if (!thread || !anchor || !selectedText) {
+    if (!thread || !anchor || !selectedText || !revisionLocalThreadId) {
       return;
     }
 
+    const activeDocumentVersion = activeDocumentVersionFromStore(
+      state,
+      session?.id ?? DEFAULT_MAIN_SESSION_ID
+    );
+
     set({ isAskingLocalQuestion: true });
 
-    const now = new Date().toISOString();
-    const suffix = makeIdSuffix();
-    const preview = buildContextPreview(
-      {
-        documentId,
-        activeVersionNodeId,
-        anchorId: anchor.id,
-        purpose: "local_question"
-      },
-      state
-    );
-    const currentDocument = state.documents[documentId];
-    const contextItems = [
-      ...(currentDocument?.rawText
-        ? [
-            {
-              type: "full_answer",
-              text: currentDocument.rawText,
-              reason: "The full main answer containing the selected passage."
-            }
-          ]
-        : []),
-      {
-        type: "selected_passage",
-        text: selectedText,
-        reason:
-          anchor.anchorType === "text_selection"
-            ? `Mouse-selected text offsets ${anchor.startOffset ?? 0}-${anchor.endOffset ?? 0}.`
-            : "Selected sentence anchor."
-      },
-      ...preview.includedItems.map((item) => ({
-        type: item.type,
-        text: item.text,
-        reason: item.reason
-      }))
-    ];
-    let answer =
-      "The model was not reached, so this fallback note records the local question for later regeneration.";
-    let revisedText: string | undefined;
-
     try {
-      const response = await fetch("/api/llm/local-question", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          anchorText: selectedText,
-          question,
-          model,
-          messages: sessionMessagesForModel(
-            state.conversationMessages,
-            session?.id
-          ),
-          contextItems
-        })
+      await syncRevisionFoundation({
+        textSelections: state.textSelections,
+        localThreads: state.localThreads,
+        localSelections: state.localSelections,
+        revisionBranches: state.revisionBranches,
+        annotations: state.revisionAnnotations,
+        revisionMessages: state.revisionMessages,
+        documentVersions: state.documentVersions,
+        manualEditDrafts: state.manualEditDrafts,
+        eventLogs: state.eventLogs,
+        timelineNodes: state.timelineNodes,
+        timelineEdges: state.timelineEdges,
+        contextSnapshots: state.contextSnapshots,
+        llmCallRecords: state.llmCallRecords
       });
 
-      if (response.ok) {
-        const data = (await response.json()) as {
-          output: {
-            answer: string;
-            revisedText?: string;
-          };
-          model: string;
-          provider: "openai" | "mock";
-        };
-        answer = data.output.answer;
-        revisedText = data.output.revisedText;
-        set({
-          selectedModel: data.model,
-          llmProvider: data.provider
-        });
+      const response = await fetch(
+        `/api/local-threads/${revisionLocalThreadId}/messages`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            question,
+            model,
+            windowId: window?.id,
+            documentId,
+            activeVersionNodeId,
+            activeDocumentVersion
+          })
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error("Failed to send local message");
       }
-    } catch {
-      // Keep the local thread usable even when the network/API is unavailable.
-    }
 
-    const userMessage: ThreadMessage = {
-      id: `msg-user-${suffix}`,
-      threadId,
-      sessionId: session?.id,
-      role: "user",
-      content: question,
-      contentState: "normal",
-      includeInContext: true,
-      createdAt: now
-    };
-    const assistantMessage: ThreadMessage = {
-      id: `msg-assistant-${suffix}`,
-      threadId,
-      sessionId: session?.id,
-      role: "assistant",
-      content: answer,
-      modelConfigId: get().selectedModel,
-      modelName: get().selectedModel,
-      contentState: "normal",
-      includeInContext: true,
-      createdAt: now
-    };
-    const userConversationMessage: ConversationMessage = {
-      id: `conv-user-${suffix}`,
-      sessionId: session?.id ?? threadSessionId(threadId),
-      role: "user",
-      content: question,
-      contentState: "normal",
-      includeInContext: true,
-      createdAt: now
-    };
-    const assistantConversationMessage: ConversationMessage = {
-      id: `conv-assistant-${suffix}`,
-      sessionId: session?.id ?? threadSessionId(threadId),
-      role: "assistant",
-      content: answer,
-      modelConfigId: get().selectedModel,
-      modelName: get().selectedModel,
-      contentState: "normal",
-      includeInContext: true,
-      createdAt: now
-    };
-    const node: VersionNode = {
-      id: `v-local-answer-${suffix}`,
-      documentId,
-      parentId: activeVersionNodeId,
-      childIds: [],
-      nodeType: "local_answer_generated",
-      label: "Local answer generated",
-      relatedAnchorId: state.threads[threadId]?.anchorId,
-      relatedThreadId: threadId,
-      isActivePath: true,
-      createdAt: now
-    };
+      const data = (await response.json()) as {
+        provider: "openai" | "mock";
+        model: string;
+        output: {
+          answer: string;
+          revisedText?: string;
+        };
+        records: {
+          userMessage: MessageModel;
+          assistantMessage: MessageModel;
+          localThread: LocalThreadModel;
+          selection: TextSelectionModel;
+          localSelection?: LocalSelectionModel;
+          contextSnapshot: ContextSnapshot;
+          llmCallRecord: LLMCallRecord;
+          events: EventLogRecord[];
+          timelineNodes: RevisionTimelineNode[];
+          timelineEdges: RevisionTimelineEdge[];
+        };
+      };
+      const now = new Date().toISOString();
+      const suffix = makeIdSuffix();
+      const userMessage: ThreadMessage = {
+        id: `msg-user-${suffix}`,
+        threadId,
+        sessionId: session?.id,
+        role: "user",
+        content: question,
+        contentState: "normal",
+        includeInContext: true,
+        revisionMessageId: data.records.userMessage.id,
+        createdAt: data.records.userMessage.createdAt
+      };
+      const assistantMessage: ThreadMessage = {
+        id: `msg-assistant-${suffix}`,
+        threadId,
+        sessionId: session?.id,
+        role: "assistant",
+        content: data.output.answer,
+        modelConfigId: data.model,
+        modelName: data.model,
+        llmCallId: data.records.llmCallRecord.id,
+        contextSnapshotId: data.records.contextSnapshot.id,
+        revisionMessageId: data.records.assistantMessage.id,
+        contentState: "normal",
+        includeInContext: true,
+        createdAt: data.records.assistantMessage.createdAt
+      };
+      const userConversationMessage: ConversationMessage = {
+        id: `conv-user-${suffix}`,
+        sessionId: session?.id ?? threadSessionId(threadId),
+        role: "user",
+        content: question,
+        contentState: "normal",
+        includeInContext: true,
+        createdAt: data.records.userMessage.createdAt
+      };
+      const assistantConversationMessage: ConversationMessage = {
+        id: `conv-assistant-${suffix}`,
+        sessionId: session?.id ?? threadSessionId(threadId),
+        role: "assistant",
+        content: data.output.answer,
+        modelConfigId: data.model,
+        modelName: data.model,
+        contentState: "normal",
+        includeInContext: true,
+        createdAt: data.records.assistantMessage.createdAt
+      };
+      const node: VersionNode = {
+        id: `v-local-answer-${suffix}`,
+        documentId,
+        parentId: activeVersionNodeId,
+        childIds: [],
+        nodeType: "local_answer_generated",
+        label: "Local answer generated",
+        relatedAnchorId: anchor.id,
+        relatedThreadId: threadId,
+        isActivePath: true,
+        createdAt: now
+      };
+      let generatedComparison: ArgumentComparison | null = null;
+      const revisedTextForComparison =
+        data.output.revisedText?.trim() || data.output.answer.trim();
+      const comparisonContextItems = data.records.contextSnapshot.includedItems.map(
+        (item) => ({
+          type: item.type,
+          text: item.text,
+          reason: item.reason
+        })
+      );
 
-    set((current) =>
-      appendVersionNodeAndCheckout(
-        appendConversationMessages({
+      if (revisedTextForComparison) {
+        set({ isGeneratingComparison: true });
+
+        try {
+          const comparisonResponse = await fetch("/api/llm/argument-comparison", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              documentId,
+              anchorId: anchor.id,
+              createdInVersionNodeId: node.id,
+              originalText: selectedText,
+              revisedText: revisedTextForComparison,
+              localQuestion: question,
+              localAnswer: data.output.answer,
+              model: data.model,
+              contextItems: comparisonContextItems
+            })
+          });
+
+          if (!comparisonResponse.ok) {
+            throw new Error("Failed to generate semantic comparison");
+          }
+
+          const comparisonData = (await comparisonResponse.json()) as {
+            provider: "openai" | "mock";
+            model: string;
+            output: {
+              comparison: ArgumentComparison;
+            };
+          };
+          generatedComparison = comparisonData.output.comparison;
+        } catch {
+          generatedComparison = createArgumentComparisonFromTexts({
+            idSuffix: `fallback-${suffix}`,
+            documentId,
+            anchorId: anchor.id,
+            originalText: selectedText,
+            revisedText: revisedTextForComparison,
+            createdInVersionNodeId: node.id,
+            now
+          });
+        }
+      }
+
+      let comparisonRevisionSync: Partial<RevisionRepositoryState> | null = null;
+
+      set((current) => {
+        const nextWithMessages = appendConversationMessages({
           state: {
             ...current,
             isAskingLocalQuestion: false,
-            isGeneratingComparison: Boolean(revisedText),
             messages: {
               ...current.messages,
               [userMessage.id]: userMessage,
@@ -1623,112 +3093,213 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
                 status: "active",
                 visibility: "visible",
                 contextPolicy: "include",
+                sourceSelectionId: data.records.selection.id,
+                sourceLocalSelectionId:
+                  data.records.localThread.parentLocalSelectionId ??
+                  current.threads[threadId].sourceLocalSelectionId,
+                revisionLocalThreadId: data.records.localThread.id,
+                revisionThreadType: data.records.localThread.threadType,
                 updatedAt: now
               }
-            }
+            },
+            textSelections: {
+              ...current.textSelections,
+              [data.records.selection.id]: data.records.selection
+            },
+            localThreads: {
+              ...current.localThreads,
+              [data.records.localThread.id]: data.records.localThread
+            },
+            localSelections: data.records.localSelection
+              ? {
+                  ...current.localSelections,
+                  [data.records.localSelection.id]: data.records.localSelection
+                }
+              : current.localSelections,
+            revisionMessages: {
+              ...current.revisionMessages,
+              [data.records.userMessage.id]: data.records.userMessage,
+              [data.records.assistantMessage.id]: data.records.assistantMessage
+            },
+            documentVersions: current.documentVersions,
+            manualEditDrafts: current.manualEditDrafts,
+            contextSnapshots: {
+              ...current.contextSnapshots,
+              [data.records.contextSnapshot.id]: data.records.contextSnapshot
+            },
+            llmCallRecords: {
+              ...current.llmCallRecords,
+              [data.records.llmCallRecord.id]: data.records.llmCallRecord
+            },
+            eventLogs: {
+              ...current.eventLogs,
+              ...Object.fromEntries(
+                data.records.events.map((event) => [event.id, event])
+              )
+            },
+            timelineNodes: {
+              ...current.timelineNodes,
+              ...Object.fromEntries(
+                data.records.timelineNodes.map((timelineNode) => [
+                  timelineNode.id,
+                  timelineNode
+                ])
+              )
+            },
+            timelineEdges: {
+              ...current.timelineEdges,
+              ...Object.fromEntries(
+                data.records.timelineEdges.map((timelineEdge) => [
+                  timelineEdge.id,
+                  timelineEdge
+                ])
+              )
+            },
+            revisionSuggestions: data.output.revisedText
+              ? {
+                  ...current.revisionSuggestions,
+                  [threadId]: data.output.revisedText
+                }
+              : current.revisionSuggestions,
+            selectedModel: data.model,
+            llmProvider: data.provider
           },
           sessionId: session?.id ?? threadSessionId(threadId),
           userMessage: userConversationMessage,
           assistantMessage: assistantConversationMessage,
-          model: get().selectedModel
-        }),
-        node
-      )
-    );
-
-    if (revisedText) {
-      set((current) => ({
-        revisionSuggestions: {
-          ...current.revisionSuggestions,
-          [threadId]: revisedText
-        }
-      }));
-
-      try {
-        const comparisonResponse = await fetch("/api/llm/argument-comparison", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            documentId,
-            anchorId: anchor.id,
-            createdInVersionNodeId: node.id,
-            originalText: selectedText,
-            revisedText,
-            localQuestion: question,
-            localAnswer: answer,
-            model: get().selectedModel,
-            contextItems
-          })
+          model: data.model
         });
+        let nextState = appendVersionNodeAndCheckout(nextWithMessages, node);
 
-        if (comparisonResponse.ok) {
-          const data = (await comparisonResponse.json()) as {
-            output: {
-              comparison: ArgumentComparison;
-            };
-            model: string;
-            provider: "openai" | "mock";
+        if (generatedComparison) {
+          const comparisonWindowId = treeWindowId(generatedComparison.id);
+          const comparisonSessionId = treeSessionId(generatedComparison.id);
+          const comparisonScope = treeContextScope({
+            currentDocumentId: documentId,
+            comparisonId: generatedComparison.id
+          });
+          const comparisonWindow: WindowInstance = nextState.windows[comparisonWindowId] ?? {
+            id: comparisonWindowId,
+            workspaceId: "default",
+            windowType: "tree_comparison",
+            title: "Semantic Difference Map",
+            conversationSessionId: comparisonSessionId,
+            modelConfigId: data.model,
+            contextScope: comparisonScope,
+            layout: {
+              isMinimized: false
+            },
+            createdAt: now,
+            updatedAt: now
           };
+          const comparisonSession: ConversationSession =
+            nextState.sessions[comparisonSessionId] ?? {
+              id: comparisonSessionId,
+              workspaceId: "default",
+              windowId: comparisonWindowId,
+              sessionType: "tree_chat",
+              modelConfigId: data.model,
+              contextScope: comparisonScope,
+              createdAt: now,
+              updatedAt: now
+            };
 
-          set((current) => ({
-            ...current,
-            selectedModel: data.model,
-            llmProvider: data.provider,
-            activeTreeWindowId: treeWindowId(data.output.comparison.id),
+          nextState = {
+            ...nextState,
             comparisons: {
-              ...current.comparisons,
-              [data.output.comparison.id]: data.output.comparison
+              ...nextState.comparisons,
+              [generatedComparison.id]: generatedComparison
             },
             windows: {
-              ...current.windows,
-              [treeWindowId(data.output.comparison.id)]: {
-                id: treeWindowId(data.output.comparison.id),
-                workspaceId: current.currentProjectId,
-                windowType: "tree_compare",
-                title: "Semantic Difference Map",
-                conversationSessionId: treeSessionId(data.output.comparison.id),
+              ...nextState.windows,
+              [comparisonWindow.id]: {
+                ...comparisonWindow,
                 modelConfigId: data.model,
-                contextScope: treeContextScope({
-                  currentDocumentId: documentId,
-                  comparisonId: data.output.comparison.id
-                }),
-                linkedDocumentId: documentId,
-                selectedComparisonId: data.output.comparison.id,
-                layout: {
-                  isMinimized: false
-                },
-                createdAt: now,
                 updatedAt: now
               }
             },
             sessions: {
-              ...current.sessions,
-              [treeSessionId(data.output.comparison.id)]: {
-                id: treeSessionId(data.output.comparison.id),
-                workspaceId: current.currentProjectId,
-                windowId: treeWindowId(data.output.comparison.id),
-                sessionType: "tree_chat",
+              ...nextState.sessions,
+              [comparisonSession.id]: {
+                ...comparisonSession,
                 modelConfigId: data.model,
-                contextScope: treeContextScope({
-                  currentDocumentId: documentId,
-                  comparisonId: data.output.comparison.id
-                }),
-                createdAt: now,
                 updatedAt: now
               }
-            }
-          }));
+            },
+            activeTreeWindowId: comparisonWindow.id,
+            selectedAnchorId: anchor.id
+          };
+
+          try {
+            const persistentComparison = ComparisonService.createComparison({
+              state: revisionStateFromStore(nextState),
+              projectId: nextState.currentProjectId,
+              conversationId: data.records.localThread.conversationId,
+              title: "Semantic Difference Map",
+              description: "Persistent graph paired with the visible semantic difference map.",
+              scopeType: "comparison",
+              scopeId: generatedComparison.id,
+              sources: [
+                {
+                  objectType: "text_selection",
+                  objectId: data.records.selection.id
+                },
+                {
+                  objectType: "message",
+                  objectId: data.records.assistantMessage.id
+                }
+              ],
+              model: data.model,
+              modelProvider: data.provider,
+              createdBy: "assistant",
+              now,
+              suffix: `semantic-map-${suffix}`
+            });
+            const graph = persistentComparison.comparison;
+            const patchedRevisionState: RevisionRepositoryState = {
+              ...persistentComparison.state,
+              comparisonGraphs: {
+                ...persistentComparison.state.comparisonGraphs,
+                [graph.id]: {
+                  ...graph,
+                  payload: {
+                    ...(graph.payload ?? {}),
+                    legacy_comparison_id: generatedComparison.id,
+                    legacyComparisonId: generatedComparison.id
+                  }
+                }
+              }
+            };
+
+            comparisonRevisionSync = {
+              comparisonGraphs: patchedRevisionState.comparisonGraphs,
+              comparisonRuns: patchedRevisionState.comparisonRuns,
+              contextSnapshots: patchedRevisionState.contextSnapshots,
+              llmCallRecords: patchedRevisionState.llmCallRecords,
+              eventLogs: patchedRevisionState.eventLogs,
+              timelineNodes: patchedRevisionState.timelineNodes,
+              timelineEdges: patchedRevisionState.timelineEdges
+            };
+            nextState = {
+              ...nextState,
+              ...revisionStorePatch(patchedRevisionState)
+            };
+          } catch {
+            comparisonRevisionSync = null;
+          }
         }
-      } catch {
-        // If comparison generation fails, keep the revised answer but do not
-        // invent a client-side comparison that did not come through the LLM API.
+
+        return nextState;
+      });
+
+      if (comparisonRevisionSync) {
+        void syncRevisionFoundation(comparisonRevisionSync);
       }
+    } catch {
+      set({ isAskingLocalQuestion: false });
     }
 
-    set({ isAskingLocalQuestion: false, isGeneratingComparison: false });
-
+    set({ isGeneratingComparison: false });
     get().refreshContextPreview();
   },
 
@@ -1773,6 +3344,14 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
 
     const now = new Date().toISOString();
     const suffix = makeIdSuffix();
+    const boardContextItems = [
+      {
+        type: "comparison_board",
+        text: JSON.stringify(comparison.board),
+        reason:
+          "Semantic Difference Map context: compact semantic alignment rows, differences, risk, and selected revision evidence."
+      }
+    ];
     const userConversationMessage: ConversationMessage = {
       id: `conv-tree-user-${suffix}`,
       sessionId: session.id,
@@ -1806,14 +3385,7 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
             state.conversationMessages,
             session.id
           ),
-          contextItems: [
-            {
-              type: "comparison_board",
-              text: JSON.stringify(comparison.board),
-              reason:
-                "Semantic Difference Map context: compact semantic alignment rows, differences, risk, and selected revision evidence."
-            }
-          ]
+          contextItems: boardContextItems
         })
       });
 
@@ -1839,6 +3411,25 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
         includeInContext: true,
         createdAt: new Date().toISOString()
       };
+      const trace = createLLMTrace({
+        suffix: `tree-${suffix}`,
+        projectId: state.currentProjectId,
+        callType: "comparison_chat",
+        purpose: "comparison_chat",
+        model: data.model,
+        provider: data.provider,
+        status: "completed",
+        prompt: question,
+        preview: customContextItemsToPreview(boardContextItems),
+        windowId: window.id,
+        sessionId: session.id,
+        documentId: comparison.documentId,
+        threadId: undefined,
+        comparisonId: comparison.id,
+        outputMessageId: assistantConversationMessage.id,
+        createdAt: now,
+        completedAt: assistantConversationMessage.createdAt
+      });
 
       set((current) => ({
         ...appendConversationMessages({
@@ -1849,6 +3440,14 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
           model: data.model
         }),
         llmProvider: data.provider,
+        contextSnapshots: {
+          ...current.contextSnapshots,
+          [trace.contextSnapshot.id]: trace.contextSnapshot
+        },
+        llmCallRecords: {
+          ...current.llmCallRecords,
+          [trace.llmCallRecord.id]: trace.llmCallRecord
+        },
         isSendingWindowMessage: {
           ...current.isSendingWindowMessage,
           [window.id]: false
@@ -1864,7 +3463,257 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
     }
   },
 
+  regenerateComparisonGraph: (comparisonId) => {
+    const state = get();
+    const comparison = state.comparisonGraphs[comparisonId];
+
+    if (!comparison || comparison.status === "deleted") {
+      return;
+    }
+
+    const result = ComparisonService.regenerateComparison({
+      state: revisionStateFromStore(state),
+      comparisonId,
+      model: state.selectedModel,
+      modelProvider: state.llmProvider,
+      now: new Date().toISOString(),
+      suffix: makeIdSuffix()
+    });
+
+    set((current) => ({
+      ...current,
+      comparisonGraphs: result.state.comparisonGraphs,
+      comparisonRuns: result.state.comparisonRuns,
+      contextSnapshots: result.state.contextSnapshots,
+      llmCallRecords: result.state.llmCallRecords,
+      eventLogs: result.state.eventLogs,
+      timelineNodes: result.state.timelineNodes,
+      timelineEdges: result.state.timelineEdges
+    }));
+    void syncRevisionFoundation({
+      comparisonGraphs: result.state.comparisonGraphs,
+      comparisonRuns: result.state.comparisonRuns,
+      contextSnapshots: result.state.contextSnapshots,
+      llmCallRecords: result.state.llmCallRecords,
+      eventLogs: result.state.eventLogs,
+      timelineNodes: result.state.timelineNodes,
+      timelineEdges: result.state.timelineEdges
+    });
+  },
+
+  clearComparisonGraph: (comparisonId, legacyComparisonId) => {
+    const state = get();
+    const comparison = state.comparisonGraphs[comparisonId];
+
+    if (!comparison || comparison.status === "deleted") {
+      return;
+    }
+
+    const result = ComparisonService.clearComparison({
+      state: revisionStateFromStore(state),
+      comparisonId,
+      now: new Date().toISOString(),
+      suffix: makeIdSuffix()
+    });
+
+    set((current) => ({
+      ...current,
+      comparisons:
+        legacyComparisonId && current.comparisons[legacyComparisonId]
+          ? {
+              ...current.comparisons,
+              [legacyComparisonId]: {
+                ...current.comparisons[legacyComparisonId],
+                status: "discarded",
+                updatedAt: new Date().toISOString()
+              }
+            }
+          : current.comparisons,
+      comparisonGraphs: result.state.comparisonGraphs,
+      eventLogs: result.state.eventLogs,
+      timelineNodes: result.state.timelineNodes,
+      timelineEdges: result.state.timelineEdges
+    }));
+    void syncRevisionFoundation({
+      comparisonGraphs: result.state.comparisonGraphs,
+      eventLogs: result.state.eventLogs,
+      timelineNodes: result.state.timelineNodes,
+      timelineEdges: result.state.timelineEdges
+    });
+  },
+
+  deleteComparisonGraph: (comparisonId, legacyComparisonId) => {
+    const state = get();
+    const comparison = state.comparisonGraphs[comparisonId];
+
+    if (!comparison || comparison.status === "deleted") {
+      return;
+    }
+
+    const result = ComparisonService.deleteComparison({
+      state: revisionStateFromStore(state),
+      comparisonId,
+      confirmed: true,
+      now: new Date().toISOString(),
+      suffix: makeIdSuffix()
+    });
+
+    set((current) => ({
+      ...current,
+      comparisons:
+        legacyComparisonId && current.comparisons[legacyComparisonId]
+          ? {
+              ...current.comparisons,
+              [legacyComparisonId]: {
+                ...current.comparisons[legacyComparisonId],
+                status: "deleted",
+                updatedAt: new Date().toISOString()
+              }
+            }
+          : current.comparisons,
+      comparisonGraphs: result.state.comparisonGraphs,
+      objectStateTransitions: result.state.objectStateTransitions,
+      eventLogs: result.state.eventLogs,
+      timelineNodes: result.state.timelineNodes,
+      timelineEdges: result.state.timelineEdges
+    }));
+    void syncRevisionFoundation({
+      comparisonGraphs: result.state.comparisonGraphs,
+      objectStateTransitions: result.state.objectStateTransitions,
+      eventLogs: result.state.eventLogs,
+      timelineNodes: result.state.timelineNodes,
+      timelineEdges: result.state.timelineEdges
+    });
+  },
+
+  exportComparisonGraph: (comparisonId) => {
+    const state = get();
+    const comparison = state.comparisonGraphs[comparisonId];
+
+    if (!comparison || comparison.status === "deleted") {
+      return;
+    }
+
+    const result = ComparisonService.exportComparison({
+      state: revisionStateFromStore(state),
+      comparisonId,
+      exportType: "markdown",
+      now: new Date().toISOString(),
+      suffix: makeIdSuffix()
+    });
+
+    set((current) => ({
+      ...current,
+      comparisonExports: result.state.comparisonExports,
+      eventLogs: result.state.eventLogs,
+      timelineNodes: result.state.timelineNodes,
+      timelineEdges: result.state.timelineEdges
+    }));
+    void syncRevisionFoundation({
+      comparisonExports: result.state.comparisonExports,
+      eventLogs: result.state.eventLogs,
+      timelineNodes: result.state.timelineNodes,
+      timelineEdges: result.state.timelineEdges
+    });
+  },
+
+  executeRevisionAction: (actionId, payload) => {
+    const result = executeWorkspaceAction(
+      revisionStateFromStore(get()),
+      actionId,
+      payload,
+      {
+        id: "local-user",
+        role: "owner",
+        permissions: "*"
+      }
+    );
+    const nextState = "state" in result
+      ? (result.state as RevisionRepositoryState | undefined)
+      : undefined;
+
+    if (nextState) {
+      set((current) => ({
+        ...current,
+        ...revisionStorePatch(nextState),
+        comparisons:
+          typeof payload.legacyComparisonId === "string" &&
+          current.comparisons[payload.legacyComparisonId]
+            ? {
+                ...current.comparisons,
+                [payload.legacyComparisonId]: {
+                  ...current.comparisons[payload.legacyComparisonId],
+                  status:
+                    actionId === "object.delete"
+                      ? "deleted"
+                      : actionId === "comparison.clear"
+                        ? "discarded"
+                        : current.comparisons[payload.legacyComparisonId].status,
+                  updatedAt: new Date().toISOString()
+                }
+              }
+            : current.comparisons
+      }));
+      void syncRevisionFoundation({
+        mainConversations: nextState.mainConversations,
+        revisionMessages: nextState.revisionMessages,
+        documentVersions: nextState.documentVersions,
+        manualEditDrafts: nextState.manualEditDrafts,
+        textSelections: nextState.textSelections,
+        localThreads: nextState.localThreads,
+        localSelections: nextState.localSelections,
+        annotations: nextState.annotations,
+        revisionBranches: nextState.revisionBranches,
+        mergeRecords: nextState.mergeRecords,
+        comparisonGraphs: nextState.comparisonGraphs,
+        comparisonRuns: nextState.comparisonRuns,
+        comparisonExports: nextState.comparisonExports,
+        objectStateTransitions: nextState.objectStateTransitions,
+        timelinePaths: nextState.timelinePaths,
+        revertRecords: nextState.revertRecords,
+        eventLogs: nextState.eventLogs,
+        timelineNodes: nextState.timelineNodes,
+        timelineEdges: nextState.timelineEdges,
+        llmCallRecords: nextState.llmCallRecords,
+        contextSnapshots: nextState.contextSnapshots,
+        actionIdempotencyRecords: nextState.actionIdempotencyRecords,
+        migrationJobs: nextState.migrationJobs,
+        migrationBatches: nextState.migrationBatches,
+        migrationIssues: nextState.migrationIssues,
+        backfillRecords: nextState.backfillRecords,
+        featureFlags: nextState.featureFlags,
+        workspaceIndexes: nextState.workspaceIndexes,
+        workspaceMetrics: nextState.workspaceMetrics
+      });
+    }
+
+    return result;
+  },
+
   deleteThreadMessage: (messageId) => {
+    const stateBeforeDelete = get();
+    const messageBeforeDelete = stateBeforeDelete.messages[messageId];
+    const revisionMessageId =
+      messageBeforeDelete?.revisionMessageId ?? messageBeforeDelete?.id;
+
+    if (
+      revisionMessageId &&
+      stateBeforeDelete.revisionMessages[revisionMessageId]
+    ) {
+      get().executeRevisionAction("object.delete", {
+        target: {
+          objectType: "message",
+          objectId: revisionMessageId,
+          projectId: stateBeforeDelete.currentProjectId,
+          conversationId: messageBeforeDelete?.sessionId,
+          status: stateBeforeDelete.revisionMessages[revisionMessageId].status
+        },
+        confirmed: true,
+        reason: "message_deleted_from_thread_card",
+        suffix: makeIdSuffix()
+      });
+    }
+
     set((state) => {
       const message = state.messages[messageId];
 
@@ -1904,11 +3753,16 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
   },
 
   addAnnotation: (content) => {
+    let revisionSync: Partial<RevisionRepositoryState> | null = null;
+
     set((state) => {
       const selectedAnchorId = state.selectedAnchorId;
       const documentId = state.currentDocumentId;
       const activeVersionNodeId = state.activeVersionNodeId;
       const anchor = selectedAnchorId ? state.anchors[selectedAnchorId] : null;
+      const thread = state.selectedThreadId
+        ? state.threads[state.selectedThreadId]
+        : undefined;
 
       if (!content.trim() || !documentId || !activeVersionNodeId || !anchor) {
         return state;
@@ -1934,6 +3788,89 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
         isActivePath: true,
         createdAt: annotation.createdAt
       };
+      const scope = defaultNoteScopeForThread(state, thread);
+      const revisionActionTarget =
+        thread?.revisionLocalThreadId &&
+        state.localThreads[thread.revisionLocalThreadId]
+          ? {
+              objectType: "local_thread" as const,
+              objectId: thread.revisionLocalThreadId,
+              projectId: state.currentProjectId,
+              conversationId: thread.conversationSessionId,
+              status: state.localThreads[thread.revisionLocalThreadId].status
+            }
+          : state.textSelections[scope.scopeId]
+            ? {
+                objectType: "text_selection" as const,
+                objectId: scope.scopeId,
+                projectId: state.currentProjectId,
+                conversationId: thread?.conversationSessionId,
+                status: state.textSelections[scope.scopeId].status
+              }
+            : {
+                objectType: "project" as const,
+                objectId: state.currentProjectId,
+                projectId: state.currentProjectId,
+                conversationId: thread?.conversationSessionId,
+                status: "active"
+              };
+      const revisionAction = executeWorkspaceAction(
+        revisionStateFromStore(state),
+        "annotation.add_context_note",
+        {
+          target: revisionActionTarget,
+          projectId: state.currentProjectId,
+          conversationId: thread?.conversationSessionId,
+          content,
+          title: "Context note",
+          now: annotation.createdAt,
+          suffix
+        },
+        {
+          id: "local-user",
+          role: "owner",
+          permissions: "*"
+        }
+      );
+      const revisionState =
+        revisionAction.status === "success"
+          ? (revisionAction.state as RevisionRepositoryState)
+          : revisionStateFromStore(state);
+      const latestRevisionAnnotation = Object.values(
+        revisionState.annotations
+      ).sort(
+        (a, b) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      )[0];
+
+      if (latestRevisionAnnotation) {
+        revisionState.annotations[latestRevisionAnnotation.id] = {
+          ...latestRevisionAnnotation,
+          scopeType: latestRevisionAnnotation.scopeType ?? scope.scopeType,
+          scopeId: latestRevisionAnnotation.scopeId ?? scope.scopeId,
+          sourceText: latestRevisionAnnotation.sourceText ?? anchor.selectedText,
+          sourceSelectionId:
+            latestRevisionAnnotation.sourceSelectionId ??
+            thread?.sourceSelectionId ??
+            anchor.id,
+          sourceLocalSelectionId:
+            latestRevisionAnnotation.sourceLocalSelectionId ??
+            thread?.sourceLocalSelectionId,
+          sourceLocalThreadId:
+            latestRevisionAnnotation.sourceLocalThreadId ??
+            thread?.revisionLocalThreadId,
+          sourceDocumentVersionId:
+            latestRevisionAnnotation.sourceDocumentVersionId ??
+            `doc-version-${activeVersionNodeId}`
+        };
+      }
+
+      revisionSync = {
+        annotations: revisionState.annotations,
+        eventLogs: revisionState.eventLogs,
+        timelineNodes: revisionState.timelineNodes,
+        timelineEdges: revisionState.timelineEdges
+      };
 
       return appendVersionNodeAndCheckout(
         {
@@ -1941,16 +3878,42 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
           annotations: {
             ...state.annotations,
             [annotation.id]: annotation
-          }
+          },
+          revisionAnnotations: revisionState.annotations,
+          eventLogs: revisionState.eventLogs,
+          timelineNodes: revisionState.timelineNodes,
+          timelineEdges: revisionState.timelineEdges
         },
         node
       );
     });
 
+    if (revisionSync) {
+      void syncRevisionFoundation(revisionSync);
+    }
+
     get().refreshContextPreview();
   },
 
   deleteAnnotation: (annotationId) => {
+    const stateBeforeDelete = get();
+    const revisionAnnotation = stateBeforeDelete.revisionAnnotations[annotationId];
+
+    if (revisionAnnotation) {
+      get().executeRevisionAction("object.delete", {
+        target: {
+          objectType: "annotation",
+          objectId: revisionAnnotation.id,
+          projectId: revisionAnnotation.projectId,
+          conversationId: revisionAnnotation.conversationId,
+          status: revisionAnnotation.status
+        },
+        confirmed: true,
+        reason: "annotation_deleted_from_context_notes",
+        suffix: makeIdSuffix()
+      });
+    }
+
     set((state) => {
       const annotation = state.annotations[annotationId];
       const documentId = state.currentDocumentId;
@@ -1989,6 +3952,8 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
   },
 
   keepAsNote: (threadId) => {
+    let revisionSync: Partial<RevisionRepositoryState> | null = null;
+
     set((state) => {
       const thread = state.threads[threadId];
 
@@ -1997,6 +3962,76 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
       }
 
       const now = new Date().toISOString();
+      const suffix = makeIdSuffix();
+      const lastAssistantMessage = Object.values(state.messages)
+        .filter(
+          (message) =>
+            message.threadId === threadId &&
+            message.role === "assistant" &&
+            message.contentState !== "deleted"
+        )
+        .sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        )[0];
+      let revisionState = revisionStateFromStore(state);
+
+      if (lastAssistantMessage?.content.trim()) {
+        const scope = defaultNoteScopeForThread(state, thread);
+        const sourceRevisionMessageId =
+          lastAssistantMessage.revisionMessageId ?? lastAssistantMessage.id;
+        const sourceNode = latestRevisionTimelineNode(
+          state,
+          "message",
+          sourceRevisionMessageId
+        );
+        const revisionAction = executeWorkspaceAction(
+          revisionState,
+          "annotation.keep_as_note",
+          {
+            target: {
+              objectType: "message",
+              objectId: sourceRevisionMessageId,
+              projectId: state.currentProjectId,
+              conversationId: thread.conversationSessionId,
+              status:
+                revisionState.revisionMessages[sourceRevisionMessageId]?.status ??
+                "active"
+            },
+            projectId: state.currentProjectId,
+            conversationId: thread.conversationSessionId,
+            title: "Kept answer",
+            scopeType: scope.scopeType,
+            scopeId: scope.scopeId,
+            sourceType:
+              thread.revisionThreadType === "nested_local"
+                ? "nested_local_answer"
+                : "local_answer",
+            sourceText: lastAssistantMessage.content,
+            sourceSelectionId: thread.sourceSelectionId,
+            sourceLocalSelectionId: thread.sourceLocalSelectionId,
+            sourceLocalThreadId: thread.revisionLocalThreadId,
+            sourceTimelineNodeId: sourceNode?.id,
+            now,
+            suffix
+          },
+          {
+            id: "local-user",
+            role: "owner",
+            permissions: "*"
+          }
+        );
+
+        if (revisionAction.status === "success") {
+          revisionState = revisionAction.state as RevisionRepositoryState;
+        }
+        revisionSync = {
+          annotations: revisionState.annotations,
+          eventLogs: revisionState.eventLogs,
+          timelineNodes: revisionState.timelineNodes,
+          timelineEdges: revisionState.timelineEdges
+        };
+      }
 
       return {
         ...state,
@@ -2009,14 +4044,43 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
             contextPolicy: "include",
             updatedAt: now
           }
-        }
+        },
+        revisionAnnotations: revisionState.annotations,
+        eventLogs: revisionState.eventLogs,
+        timelineNodes: revisionState.timelineNodes,
+        timelineEdges: revisionState.timelineEdges
       };
     });
+
+    if (revisionSync) {
+      void syncRevisionFoundation(revisionSync);
+    }
 
     get().refreshContextPreview();
   },
 
   createBranch: (threadId) => {
+    const stateBeforeBranch = get();
+    const threadBeforeBranch = stateBeforeBranch.threads[threadId];
+
+    if (
+      threadBeforeBranch?.sourceLocalSelectionId &&
+      stateBeforeBranch.localSelections[threadBeforeBranch.sourceLocalSelectionId]
+    ) {
+      get().executeRevisionAction("branch.create", {
+        target: {
+          objectType: "local_selection",
+          objectId: threadBeforeBranch.sourceLocalSelectionId,
+          projectId: stateBeforeBranch.currentProjectId,
+          conversationId: threadBeforeBranch.conversationSessionId,
+          status:
+            stateBeforeBranch.localSelections[threadBeforeBranch.sourceLocalSelectionId]
+              .status
+        },
+        suffix: makeIdSuffix()
+      });
+    }
+
     set((state) => {
       const thread = state.threads[threadId];
       const documentId = state.currentDocumentId;
@@ -2070,122 +4134,453 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
     get().refreshContextPreview();
   },
 
-  requestMerge: (threadId) => {
+  openMergeModalForSource: (sourceType, sourceId, mergeMode = "replace_selection") => {
     const state = get();
-    const thread = state.threads[threadId];
-    const anchor = thread ? state.anchors[thread.anchorId] : null;
-    const document = state.currentDocumentId
-      ? state.documents[state.currentDocumentId]
-      : null;
-    const activeVersionNodeId = state.activeVersionNodeId;
+    const now = new Date().toISOString();
+    const targetObjectType =
+      sourceType === "revision_branch"
+        ? "revision_branch"
+        : sourceType === "local_selection" ||
+            sourceType === "nested_local_selection"
+          ? "local_selection"
+          : "message";
+    const targetStatus =
+      targetObjectType === "revision_branch"
+        ? state.revisionBranches[sourceId]?.status
+        : targetObjectType === "local_selection"
+          ? state.localSelections[sourceId]?.status
+          : state.revisionMessages[sourceId]?.status;
+    const actionResult = get().executeRevisionAction("merge.into_document", {
+      target: {
+        objectType: targetObjectType,
+        objectId: sourceId,
+        projectId: state.currentProjectId,
+        conversationId: DEFAULT_MAIN_SESSION_ID,
+        status: targetStatus ?? "active"
+      },
+      projectId: state.currentProjectId,
+      conversationId: DEFAULT_MAIN_SESSION_ID,
+      sourceType,
+      mergeMode,
+      now,
+      suffix: makeIdSuffix()
+    });
+    const resultState = "state" in actionResult && actionResult.state
+      ? (actionResult.state as RevisionRepositoryState)
+      : revisionStateFromStore(get());
+    const mergeRecord =
+      (actionResult as { result?: { mergeRecord?: MergeRecordModel } }).result
+        ?.mergeRecord ??
+      Object.values(resultState.mergeRecords)
+        .filter((merge) => merge.sourceId === sourceId)
+        .sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        )[0];
 
-    if (!thread || !anchor || !document || !activeVersionNodeId) {
+    set((current) => ({
+      ...current,
+      activeMergeRecordId: mergeRecord?.id ?? null,
+      pendingMergeDiff:
+        ((mergeRecord?.diff ?? mergeRecord?.diffSummary ?? null) as TextDiff | null),
+      mergeConflictMessage:
+        mergeRecord?.conflictReason ??
+        (actionResult.status === "blocked" ? actionResult.reason : null),
+      mergeRecords: resultState.mergeRecords,
+      eventLogs: resultState.eventLogs,
+      timelineNodes: resultState.timelineNodes,
+      timelineEdges: resultState.timelineEdges
+    }));
+  },
+
+  setMergeMode: (mergeMode) => {
+    const state = get();
+    const activeMerge = state.activeMergeRecordId
+      ? state.mergeRecords[state.activeMergeRecordId]
+      : null;
+
+    if (!activeMerge?.sourceType || !activeMerge.sourceId) {
       return;
     }
 
-    if (!anchor.blockId) {
+    get().openMergeModalForSource(
+      activeMerge.sourceType,
+      activeMerge.sourceId,
+      mergeMode
+    );
+  },
+
+  setManualMergeTarget: (start, end) => {
+    const state = get();
+    const activeMerge = state.activeMergeRecordId
+      ? state.mergeRecords[state.activeMergeRecordId]
+      : null;
+
+    if (!activeMerge?.sourceType || !activeMerge.sourceId) {
+      return;
+    }
+
+    const targetObjectType =
+      activeMerge.sourceType === "revision_branch"
+        ? "revision_branch"
+        : activeMerge.sourceType === "local_selection" ||
+            activeMerge.sourceType === "nested_local_selection"
+          ? "local_selection"
+          : "message";
+    const targetStatus =
+      targetObjectType === "revision_branch"
+        ? state.revisionBranches[activeMerge.sourceId]?.status
+        : targetObjectType === "local_selection"
+          ? state.localSelections[activeMerge.sourceId]?.status
+          : state.revisionMessages[activeMerge.sourceId]?.status;
+    const actionResult = get().executeRevisionAction("merge.into_document", {
+      target: {
+        objectType: targetObjectType,
+        objectId: activeMerge.sourceId,
+        projectId: state.currentProjectId,
+        conversationId: activeMerge.conversationId ?? DEFAULT_MAIN_SESSION_ID,
+        status: targetStatus ?? "active"
+      },
+      projectId: state.currentProjectId,
+      conversationId: activeMerge.conversationId ?? DEFAULT_MAIN_SESSION_ID,
+      sourceType: activeMerge.sourceType,
+      mergeMode: activeMerge.mergeMode,
+      manualTargetRange: {
+        start,
+        end,
+        selectionId: activeMerge.targetSelectionId
+      },
+      suffix: makeIdSuffix()
+    });
+    const resultState =
+      "state" in actionResult && actionResult.state
+        ? (actionResult.state as RevisionRepositoryState)
+        : revisionStateFromStore(get());
+    const mergeRecord =
+      (actionResult as { result?: { mergeRecord?: MergeRecordModel } }).result
+        ?.mergeRecord ??
+      Object.values(resultState.mergeRecords)
+        .filter((merge) => merge.sourceId === activeMerge.sourceId)
+        .sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        )[0];
+
+    set((current) => ({
+      ...current,
+      activeMergeRecordId: mergeRecord?.id ?? null,
+      pendingMergeDiff:
+        ((mergeRecord?.diff ?? mergeRecord?.diffSummary ?? null) as TextDiff | null),
+      mergeConflictMessage: mergeRecord?.conflictReason ?? null,
+      mergeRecords: resultState.mergeRecords,
+      eventLogs: resultState.eventLogs,
+      timelineNodes: resultState.timelineNodes,
+      timelineEdges: resultState.timelineEdges
+    }));
+  },
+
+  requestMerge: (threadId) => {
+    const state = get();
+    const thread = state.threads[threadId];
+
+    if (!thread) {
+      return;
+    }
+
+    const lastAssistantMessage = Object.values(state.messages)
+      .filter(
+        (message) =>
+          message.threadId === threadId &&
+          message.role === "assistant" &&
+          message.contentState !== "deleted"
+      )
+      .sort(
+        (a, b) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      )[0];
+    const sourceId = lastAssistantMessage?.revisionMessageId;
+
+    if (!sourceId) {
       set({
-        pendingPatch: [],
-        isDiffModalOpen: false
+        activeMergeRecordId: null,
+        pendingMergeDiff: null,
+        mergeConflictMessage: "No persisted local assistant answer is available to merge."
       });
       return;
     }
 
-    const visibleBlocks = getBlocksVisibleAtVersion(
-      state,
-      document.id,
-      document.rootVersionNodeId,
-      activeVersionNodeId
+    get().openMergeModalForSource(
+      thread.revisionThreadType === "nested_local"
+        ? "nested_local_answer"
+        : "local_answer",
+      sourceId,
+      "replace_selection"
     );
-    const patch = createRevisionPatch(
-      visibleBlocks,
-      anchor.blockId,
-      state.revisionSuggestions[threadId] ?? anchor.selectedText
-    );
+  },
 
-    set({
-      pendingPatch: patch,
-      isDiffModalOpen: patch.length > 0
+  requestMergeFromSelection: (selection) => {
+    const state = get();
+
+    if (!selection.sourceLocalThreadId || !selection.sourceAnswerId) {
+      return;
+    }
+
+    const sourceLocalThread = state.localThreads[selection.sourceLocalThreadId];
+    const now = new Date().toISOString();
+    const suffix = makeIdSuffix();
+    const localSelectionResult = LocalSelectionService.createOrGetLocalSelection({
+      state: revisionStateFromStore(state),
+      projectId: state.currentProjectId,
+      conversationId: selection.conversationId,
+      sourceLocalThreadId: selection.sourceLocalThreadId,
+      sourceMessageId: selection.sourceMessageId ?? selection.sourceAnswerId,
+      sourceAnswerId: selection.sourceAnswerId,
+      parentSelectionId:
+        selection.parentSelectionId ?? sourceLocalThread?.sourceSelectionId,
+      parentLocalSelectionId:
+        selection.parentLocalSelectionId ?? sourceLocalThread?.parentLocalSelectionId,
+      sourceDocumentVersionId:
+        selection.sourceDocumentVersionId ?? sourceLocalThread?.sourceDocumentVersionId,
+      selectedText: selection.selectedText,
+      startOffset: selection.startOffset,
+      endOffset: selection.endOffset,
+      beforeContext: selection.contextBefore,
+      afterContext: selection.contextAfter,
+      textHash: selection.textHash,
+      sourceThreadType:
+        selection.sourceThreadType ?? sourceLocalThread?.threadType ?? "local",
+      now,
+      suffix
+    });
+    const sourceType =
+      localSelectionResult.localSelection.sourceThreadType === "nested_local"
+        ? "nested_local_selection"
+        : "local_selection";
+    const mergeAction = executeWorkspaceAction(
+      localSelectionResult.state,
+      "merge.into_document",
+      {
+        target: {
+          objectType: "local_selection",
+          objectId: localSelectionResult.localSelection.id,
+          projectId: state.currentProjectId,
+          conversationId: selection.conversationId,
+          status: localSelectionResult.localSelection.status
+        },
+        projectId: state.currentProjectId,
+        conversationId: selection.conversationId,
+        sourceType,
+        mergeMode: "replace_selection",
+        now,
+        suffix: `${suffix}-merge`
+      },
+      {
+        id: "local-user",
+        role: "owner",
+        permissions: "*"
+      }
+    );
+    const mergeState = "state" in mergeAction && mergeAction.state
+      ? (mergeAction.state as RevisionRepositoryState)
+      : localSelectionResult.state;
+    const mergeRecord =
+      (mergeAction as { result?: { mergeRecord?: MergeRecordModel } }).result
+        ?.mergeRecord ??
+      Object.values(mergeState.mergeRecords)
+        .filter((merge) => merge.sourceId === localSelectionResult.localSelection.id)
+        .sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        )[0];
+
+    set((current) => ({
+      ...current,
+      activeMergeRecordId: mergeRecord?.id ?? null,
+      pendingMergeDiff:
+        ((mergeRecord?.diff ?? mergeRecord?.diffSummary ?? null) as TextDiff | null),
+      mergeConflictMessage: mergeRecord?.conflictReason ?? null,
+      localSelections: mergeState.localSelections,
+      mergeRecords: mergeState.mergeRecords,
+      eventLogs: mergeState.eventLogs,
+      timelineNodes: mergeState.timelineNodes,
+      timelineEdges: mergeState.timelineEdges
+    }));
+    void syncRevisionFoundation({
+      localSelections: mergeState.localSelections,
+      mergeRecords: mergeState.mergeRecords,
+      eventLogs: mergeState.eventLogs,
+      timelineNodes: mergeState.timelineNodes,
+      timelineEdges: mergeState.timelineEdges
     });
   },
 
   confirmMerge: () => {
-    set((state) => {
-      const threadId = state.selectedThreadId;
-      const thread = threadId ? state.threads[threadId] : null;
-      const documentId = state.currentDocumentId;
-      const activeVersionNodeId = state.activeVersionNodeId;
+    const state = get();
+    const mergeId = state.activeMergeRecordId;
 
-      if (
-        !thread ||
-        !documentId ||
-        !activeVersionNodeId ||
-        state.pendingPatch.length === 0
-      ) {
-        return {
-          ...state,
-          isDiffModalOpen: false,
-          pendingPatch: []
-        };
-      }
+    if (!mergeId) {
+      return;
+    }
 
-      const document = state.documents[documentId];
-      const visibleBlocks = getBlocksVisibleAtVersion(
-        state,
-        documentId,
-        document.rootVersionNodeId,
-        activeVersionNodeId
-      );
-      const branch = thread.relatedBranchId
-        ? state.branches[thread.relatedBranchId]
-        : undefined;
-      const result = mergeThreadIntoDocument({
-        documentId,
-        parentVersionNodeId: activeVersionNodeId,
-        thread,
-        branch,
-        blocks: visibleBlocks,
-        patch: state.pendingPatch,
-        idSuffix: makeIdSuffix()
-      });
-      const nextState = appendVersionNodeAndCheckout(
-        {
-          ...state,
-          blocks: toRecord(result.snapshot.blocks),
-          threads: {
-            ...state.threads,
-            [thread.id]: result.thread
-          },
-          branches: result.branch
-            ? {
-                ...state.branches,
-                [result.branch.id]: result.branch
-              }
-            : state.branches,
-          snapshots: {
-            ...state.snapshots,
-            [result.snapshot.id]: result.snapshot
-          },
-          isDiffModalOpen: false,
-          pendingPatch: []
-        },
-        result.node
-      );
-
-      return nextState;
+    const mergeRecord = state.mergeRecords[mergeId];
+    const actionResult = get().executeRevisionAction("merge.into_document", {
+      target: {
+        objectType: "merge_record",
+        objectId: mergeId,
+        projectId: state.currentProjectId,
+        conversationId: mergeRecord?.conversationId,
+        status: mergeRecord?.status ?? "diff_ready"
+      },
+      confirmed: true,
+      diffAccepted: true,
+      suffix: makeIdSuffix()
     });
+    const result = actionResult.status === "success"
+      ? (actionResult.result as ReturnType<typeof MergeService.confirmMerge>)
+      : null;
 
+    if (!result || !result.ok) {
+      set((current) => ({
+        ...current,
+        mergeRecords:
+          result?.state.mergeRecords ?? current.mergeRecords,
+        eventLogs: result?.state.eventLogs ?? current.eventLogs,
+        timelineNodes: result?.state.timelineNodes ?? current.timelineNodes,
+        timelineEdges: result?.state.timelineEdges ?? current.timelineEdges,
+        mergeConflictMessage:
+          result?.conflictReason ??
+          (actionResult.status === "blocked"
+            ? actionResult.reason
+            : "The active document changed before confirmation.")
+      }));
+      return;
+    }
+
+    set((current) => ({
+      ...current,
+      documents:
+        current.currentDocumentId && current.documents[current.currentDocumentId]
+          ? {
+              ...current.documents,
+              [current.currentDocumentId]: {
+                ...current.documents[current.currentDocumentId],
+                rawText: result.documentVersion.content,
+                updatedAt: result.documentVersion.createdAt
+              }
+            }
+          : current.documents,
+      projects: Object.fromEntries(
+        Object.values(current.projects).map((project) => [
+          project.id,
+          project.id === current.currentProjectId
+            ? {
+                ...project,
+                updatedAt: result.documentVersion.createdAt
+              }
+            : project
+        ])
+      ),
+      mainConversations: result.state.mainConversations,
+      documentVersions: result.state.documentVersions,
+      textSelections: result.state.textSelections,
+      revisionBranches: result.state.revisionBranches,
+      mergeRecords: result.state.mergeRecords,
+      eventLogs: result.state.eventLogs,
+      timelineNodes: result.state.timelineNodes,
+      timelineEdges: result.state.timelineEdges,
+      activeMergeRecordId: null,
+      pendingMergeDiff: null,
+      mergeConflictMessage: null
+    }));
+    void syncRevisionFoundation({
+      projects: result.state.projects,
+      mainConversations: result.state.mainConversations,
+      documentVersions: result.state.documentVersions,
+      textSelections: result.state.textSelections,
+      revisionBranches: result.state.revisionBranches,
+      mergeRecords: result.state.mergeRecords,
+      eventLogs: result.state.eventLogs,
+      timelineNodes: result.state.timelineNodes,
+      timelineEdges: result.state.timelineEdges
+    });
     get().refreshContextPreview();
+  },
+
+  cancelActiveMerge: () => {
+    const state = get();
+    const mergeId = state.activeMergeRecordId;
+
+    if (!mergeId) {
+      set({
+        activeMergeRecordId: null,
+        pendingMergeDiff: null,
+        mergeConflictMessage: null
+      });
+      return;
+    }
+
+    const mergeRecord = state.mergeRecords[mergeId];
+    const actionResult = get().executeRevisionAction("merge.cancel", {
+      target: {
+        objectType: "merge_record",
+        objectId: mergeId,
+        projectId: state.currentProjectId,
+        conversationId: mergeRecord?.conversationId,
+        status: mergeRecord?.status ?? "diff_ready"
+      },
+      suffix: makeIdSuffix()
+    });
+    const resultState =
+      "state" in actionResult && actionResult.state
+        ? (actionResult.state as RevisionRepositoryState)
+        : revisionStateFromStore(get());
+
+    set((current) => ({
+      ...current,
+      mergeRecords: resultState.mergeRecords,
+      eventLogs: resultState.eventLogs,
+      timelineNodes: resultState.timelineNodes,
+      timelineEdges: resultState.timelineEdges,
+      activeMergeRecordId: null,
+      pendingMergeDiff: null,
+      mergeConflictMessage: null
+    }));
   },
 
   closeDiffModal: () => {
     set({
       isDiffModalOpen: false,
-      pendingPatch: []
+      pendingPatch: [],
+      activeMergeRecordId: null,
+      pendingMergeDiff: null,
+      mergeConflictMessage: null
     });
   },
 
   discardThread: (threadId) => {
+    const stateBeforeDiscard = get();
+    const threadBeforeDiscard = stateBeforeDiscard.threads[threadId];
+
+    if (
+      threadBeforeDiscard?.revisionLocalThreadId &&
+      stateBeforeDiscard.localThreads[threadBeforeDiscard.revisionLocalThreadId]
+    ) {
+      get().executeRevisionAction("object.discard", {
+        target: {
+          objectType: "local_thread",
+          objectId: threadBeforeDiscard.revisionLocalThreadId,
+          projectId: stateBeforeDiscard.currentProjectId,
+          conversationId: threadBeforeDiscard.conversationSessionId,
+          status:
+            stateBeforeDiscard.localThreads[threadBeforeDiscard.revisionLocalThreadId]
+              .status
+        },
+        confirmed: true,
+        reason: "local_thread_discarded_from_action_bar",
+        suffix: makeIdSuffix()
+      });
+    }
+
     set((state) => {
       const thread = state.threads[threadId];
       const documentId = state.currentDocumentId;
@@ -2238,6 +4633,29 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
   },
 
   deleteAnswer: (threadId) => {
+    const stateBeforeDelete = get();
+    const threadBeforeDelete = stateBeforeDelete.threads[threadId];
+
+    if (
+      threadBeforeDelete?.revisionLocalThreadId &&
+      stateBeforeDelete.localThreads[threadBeforeDelete.revisionLocalThreadId]
+    ) {
+      get().executeRevisionAction("object.delete", {
+        target: {
+          objectType: "local_thread",
+          objectId: threadBeforeDelete.revisionLocalThreadId,
+          projectId: stateBeforeDelete.currentProjectId,
+          conversationId: threadBeforeDelete.conversationSessionId,
+          status:
+            stateBeforeDelete.localThreads[threadBeforeDelete.revisionLocalThreadId]
+              .status
+        },
+        confirmed: true,
+        reason: "local_thread_deleted_from_action_bar",
+        suffix: makeIdSuffix()
+      });
+    }
+
     set((state) => {
       const thread = state.threads[threadId];
       const documentId = state.currentDocumentId;
@@ -2306,6 +4724,23 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
   },
 
   revertToNode: (nodeId) => {
+    const stateBeforeRevert = get();
+
+    if (stateBeforeRevert.timelineNodes[nodeId]) {
+      get().executeRevisionAction("timeline.revert_to_node", {
+        target: {
+          objectType: "timeline_node",
+          objectId: nodeId,
+          projectId: stateBeforeRevert.currentProjectId,
+          conversationId: DEFAULT_MAIN_SESSION_ID,
+          status: stateBeforeRevert.timelineNodes[nodeId].status
+        },
+        confirmed: true,
+        diffAccepted: true,
+        suffix: makeIdSuffix()
+      });
+    }
+
     set((state) => {
       const documentId = state.currentDocumentId;
 
@@ -2358,4 +4793,79 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>((set, get) => ({
       )
     });
   }
-}));
+    }),
+    {
+      name: "answer-atlas-workspace-v1",
+      storage: createJSONStorage(() => localStorage),
+      partialize: (state) => ({
+        currentProjectId: state.currentProjectId,
+        projects: state.projects,
+        mainWindowId: state.mainWindowId,
+        activeTreeWindowId: state.activeTreeWindowId,
+        currentDocumentId: state.currentDocumentId,
+        activeVersionNodeId: state.activeVersionNodeId,
+        selectedAnchorId: state.selectedAnchorId,
+        selectedThreadId: state.selectedThreadId,
+        activeRevisionBranchId: state.activeRevisionBranchId,
+        activeMergeRecordId: state.activeMergeRecordId,
+        windows: state.windows,
+        sessions: state.sessions,
+        conversationMessages: state.conversationMessages,
+        documents: state.documents,
+        blocks: state.blocks,
+        anchors: state.anchors,
+        threads: state.threads,
+        messages: state.messages,
+        annotations: state.annotations,
+        revisionAnnotations: state.revisionAnnotations,
+        versionNodes: state.versionNodes,
+        branches: state.branches,
+        comparisons: state.comparisons,
+        snapshots: state.snapshots,
+        tombstones: state.tombstones,
+        contextSnapshots: state.contextSnapshots,
+        llmCallRecords: state.llmCallRecords,
+        mainConversations: state.mainConversations,
+        revisionMessages: state.revisionMessages,
+        documentVersions: state.documentVersions,
+        manualEditDrafts: state.manualEditDrafts,
+        textSelections: state.textSelections,
+        localThreads: state.localThreads,
+        localSelections: state.localSelections,
+        revisionBranches: state.revisionBranches,
+        mergeRecords: state.mergeRecords,
+        comparisonGraphs: state.comparisonGraphs,
+        comparisonRuns: state.comparisonRuns,
+        comparisonExports: state.comparisonExports,
+        objectStateTransitions: state.objectStateTransitions,
+        timelinePaths: state.timelinePaths,
+        revertRecords: state.revertRecords,
+        eventLogs: state.eventLogs,
+        timelineNodes: state.timelineNodes,
+        timelineEdges: state.timelineEdges,
+        actionIdempotencyRecords: state.actionIdempotencyRecords,
+        migrationJobs: state.migrationJobs,
+        migrationBatches: state.migrationBatches,
+        migrationIssues: state.migrationIssues,
+        backfillRecords: state.backfillRecords,
+        featureFlags: state.featureFlags,
+        workspaceIndexes: state.workspaceIndexes,
+        workspaceMetrics: state.workspaceMetrics,
+        timelineNodeProjections: state.timelineNodeProjections,
+        timelineGraphSnapshots: state.timelineGraphSnapshots,
+        objectRelationIndex: state.objectRelationIndex,
+        contextItemIndex: state.contextItemIndex,
+        threadSummaries: state.threadSummaries,
+        documentChunks: state.documentChunks,
+        contextBuildCaches: state.contextBuildCaches,
+        selectedModel: state.selectedModel,
+        llmProvider: state.llmProvider,
+        modelSource: state.modelSource,
+        availableModels: state.availableModels,
+        revisionSuggestions: state.revisionSuggestions,
+        pendingMergeDiff: state.pendingMergeDiff,
+        mergeConflictMessage: state.mergeConflictMessage
+      })
+    }
+  )
+);

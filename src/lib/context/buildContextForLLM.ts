@@ -29,6 +29,10 @@ function exclusionReason(
     return "Thread is deleted.";
   }
 
+  if (thread.status === "discarded") {
+    return "Thread is discarded and excluded by default.";
+  }
+
   if (thread.contextPolicy === "exclude") {
     return "Thread context policy excludes it.";
   }

@@ -11,7 +11,8 @@ export function getComparisonForAnchor(
   return (
     Object.values(comparisons).find(
       (comparison) =>
-        comparison.anchorId === anchorId && comparison.status !== "deleted"
+        comparison.anchorId === anchorId &&
+        (comparison.status === "active" || comparison.status === "merged")
     ) ?? null
   );
 }
