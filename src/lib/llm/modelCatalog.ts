@@ -66,10 +66,9 @@ export function prioritizePreferredDefaultModel(
   models: string[],
   preferredModel = PREFERRED_DEFAULT_MODEL
 ) {
-  return [
-    preferredModel,
-    ...models.filter((model) => model !== preferredModel)
-  ];
+  return models.includes(preferredModel)
+    ? [preferredModel, ...models.filter((model) => model !== preferredModel)]
+    : models;
 }
 
 export function buildMockModelCatalog(): ModelCatalog {

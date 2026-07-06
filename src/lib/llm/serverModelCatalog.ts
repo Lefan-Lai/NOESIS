@@ -38,7 +38,9 @@ export async function getOpenAIModelCatalog(): Promise<ModelCatalog> {
 
   return {
     models,
-    defaultModel: PREFERRED_DEFAULT_MODEL,
+    defaultModel: models.includes(PREFERRED_DEFAULT_MODEL)
+      ? PREFERRED_DEFAULT_MODEL
+      : models[0],
     provider: "openai",
     configuredAllowlist,
     source: "openai-api"

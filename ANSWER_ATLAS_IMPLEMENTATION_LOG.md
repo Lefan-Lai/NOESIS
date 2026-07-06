@@ -1,5 +1,507 @@
 # Answer Atlas 实现记录
 
+## 2026-07-06 - Timeline 改为动态 Logical Depth 与分支折叠规则
+
+### 修改原因
+
+用户指出 Timeline 不能预设固定层级，例如：
+
+```text
+Main Path
+Local Checks
+Follow-up Checks
+Drafts
+Memory
+Inactive
+```
+
+因为真实的人的思考路径不是按 object type 分层，而是按用户操作动态分层：
+
+```text
+一开始只有主线
+用户从某个节点选中内容并追问，才分出下一层
+用户在 local answer 中继续追问，才继续深入下一层
+用户 merge / keep note / revert，才回到上一层或主线
+```
+
+### 修改文件
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/components/timeline/VersionTimeline.tsx
+src/components/timeline/TimelineNode.tsx
+src/components/timeline/BranchLane.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### 新增 Logical Depth 规则
+
+`timelineHumanize.ts` 现在不再把节点固定映射到 `local / followup / draft` 这些 lane。
+
+新的推导规则：
+
+```text
+main conversation / document movement
+→ logicalDepth = 0
+
+anchor_selected / branch_created
+→ parentDepth + 1
+
+local question / local answer
+→ 继承 parentDepth
+
+merged / document_revised
+→ max(parentDepth - 1, 0)
+
+annotation
+→ memory lane，不改变 depth
+
+discarded / deleted / inactive future path
+→ inactive lane，默认折叠
+```
+
+因此可见层级现在是动态生成的：
+
+```text
+Level 0 - Main Path
+Level 1 - Branch
+Level 2 - Branch
+...
+```
+
+不是固定写死的分类泳道。
+
+### Branch Group 规则
+
+每个分支节点会推导：
+
+```text
+branchGroupId
+logicalDepth
+folded
+foldReason
+```
+
+规则：
+
+```text
+depth = 0
+→ branchGroupId = main
+
+startsBranch(node)
+→ branchGroupId = node.id
+
+branch 内后续节点
+→ 继承 parent branchGroupId
+```
+
+### 大分支折叠规则
+
+当以下条件成立：
+
+```text
+collapseLargeBranches = true
+logicalDepth > 0
+branchSize > 4
+node is not active path
+node is not merge node
+```
+
+该分支会被折叠。
+
+折叠后：
+
+```text
+只显示该 branch group 的第一个 summary chip
+后续同组节点暂时隐藏
+hover 显示 foldReason，例如 large branch (7 steps)
+左侧控制栏显示 folded branch count
+```
+
+这只是显示层折叠：
+
+```text
+不会删除节点
+不会改变 active path
+不会改变 memory
+不会改变 EventLog
+```
+
+### 左侧控制器更新
+
+左侧栏不再只是 legend，现在可以控制：
+
+```text
+Show 1 level
+Show 2 levels
+Show 3 levels
+Show all active levels
+
+Show / Hide inactive paths
+Show / Hide memory notes
+Collapse / Expand large branches
+```
+
+默认：
+
+```text
+maxVisibleDepth = 2
+showInactive = false
+showMemory = true
+collapseLargeBranches = true
+```
+
+也就是默认最多显示三层人的逻辑路径，inactive 不占常驻 lane。
+
+### 节点显示规则
+
+节点默认仍然保持 compact chip：
+
+```text
+短标题
+时间
+圆点
+```
+
+详细内容在 hover：
+
+```text
+relation label
+status label
+active badge
+title
+selected text / summary
+fold reason
+created time
+```
+
+### Memory / LLM 影响
+
+本次修改仍然只影响 Timeline 前端推导和显示：
+
+```text
+不改变 VersionNode 数据结构
+不改变 TimelineEdge 数据结构
+不改变 EventLog
+不改变 ContextSnapshot
+不改变 LLM prompt
+不改变 memory scope
+不删除任何历史
+```
+
+目前 logicalDepth / branchGroupId / folded 都是前端根据已有数据推导出来的展示模型。
+
+## 2026-07-06 - Timeline 紧凑化、Hover 详情、全屏模式与 Inactive 折叠
+
+### 修改原因
+
+用户指出新版 Timeline 仍有四个可视化问题：
+
+```text
+1. 节点、lane label、曲线之间互相遮挡。
+2. 右上角放大按钮应该真正进入全屏。
+3. 节点默认文字应该非常简略，详细描述应该放到 hover。
+4. Inactive History 不应该常驻占据一整条 lane，否则图会变得过大。
+```
+
+### 修改文件
+
+```text
+src/components/timeline/VersionTimeline.tsx
+src/components/timeline/TimelineNode.tsx
+src/components/timeline/BranchLane.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### 节点显示规则
+
+`TimelineNode` 从大卡片改成紧凑 chip：
+
+```text
+默认只显示短标题
+时间显示在点上方
+状态、摘要、relation、active 标记放到 hover popover
+点击节点仍然打开操作菜单
+```
+
+这样默认视图优先表达路径，而不是把所有解释文字堆在图上。
+
+### Hover 详情规则
+
+鼠标移动到节点上时显示详情：
+
+```text
+relation label
+status label
+active badge
+human title
+selected text / object summary
+created time
+```
+
+点击节点时继续显示操作菜单：
+
+```text
+Revert to This Node
+View Diff
+Open Related Thread
+Delete Related Answer
+```
+
+hover popover 与 click menu 分离，避免默认信息遮挡 timeline dot。
+
+### Layout 防遮挡规则
+
+Timeline graph 的起点从左侧 lane label 后方开始：
+
+```text
+GRAPH_PADDING_X = 224
+```
+
+这样 lane label 不会压住第一个节点或第一条曲线。
+
+节点高度也压缩：
+
+```text
+LANE_HEIGHT = 112
+node chip height = 44
+```
+
+### Inactive History 折叠规则
+
+`Inactive History` 默认不作为常驻 lane 展示。
+
+左侧 `Logic lanes` 增加控制：
+
+```text
+Show inactive paths (n)
+Hide inactive paths (n)
+```
+
+默认状态：
+
+```text
+showInactive = false
+```
+
+因此 inactive nodes 会被过滤，不占图高度。
+
+当用户选择显示 inactive paths 时：
+
+```text
+Inactive History lane 才被加入可见 lane
+inactive nodes 才重新参与 layout
+inactive edges 使用灰色虚线
+```
+
+### 全屏模式
+
+右上角放大按钮现在会打开真正的 fullscreen overlay：
+
+```text
+fixed inset-0
+占满浏览器窗口
+顶部显示 Version Timeline 标题与关闭按钮
+左侧保留 Logic lanes 控制
+右侧使用同一套 TimelineGraphCanvas
+```
+
+普通视图与全屏视图复用同一个 `TimelineGraphCanvas`，避免两套渲染逻辑分叉。
+
+### Memory / LLM 影响
+
+本次修改只影响 Timeline 前端可视化：
+
+```text
+不改变 EventLog
+不改变 VersionNode 数据
+不改变 TimelineEdge 数据
+不改变 active path 计算
+不改变 ContextSnapshot
+不改变 LLM prompt
+不改变 memory scope
+```
+
+Inactive 折叠只是显示层过滤，不会删除任何历史节点。
+
+## 2026-07-06 - Timeline 改为人的逻辑路径图
+
+### 修改原因
+
+用户指出当前 Timeline 的问题不是单纯样式问题，而是逻辑表达问题：
+
+```text
+Timeline 应该反映人的修订思路
+什么时候分出去、什么时候回来，应该符合人的操作逻辑
+节点命名不能直接显示重复的技术事件名
+```
+
+旧 Timeline 把所有节点按时间排成一条线，导致：
+
+```text
+局部追问看起来像主线推进
+merge back 看不出是从旁支回到主文档
+Selected text / Local answer generated 等节点重复且不说明人的意图
+active / inactive 的语义不够清楚
+```
+
+### 修改文件
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/components/timeline/VersionTimeline.tsx
+src/components/timeline/TimelineNode.tsx
+src/components/timeline/BranchLane.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### 新增 Timeline Humanizer
+
+新增 `timelineHumanize.ts`，用于把底层 `VersionNode` 转换为人可读的展示模型：
+
+```text
+VersionNode
+→ HumanTimelineNode
+```
+
+每个 humanized node 包含：
+
+```text
+laneId
+title
+subtitle
+statusLabel
+statusTone
+relationLabel
+node
+```
+
+### Lane 规则
+
+Timeline 现在按人的思考路径分成这些 lane：
+
+```text
+Main Path
+Local Checks
+Follow-up Checks
+Drafts & Merges
+Memory Notes
+Inactive History
+```
+
+规则：
+
+```text
+document_created / document_revised / merged / reverted
+→ Main Path
+
+anchor_selected
+→ Local Checks
+
+anchor_selected from local answer
+→ Follow-up Checks
+
+local_answer_generated / local_question_asked
+→ Local Checks 或 Follow-up Checks
+
+branch_created / revision_generated
+→ Drafts & Merges
+
+annotation_added / annotation_deleted
+→ Memory Notes
+
+discarded / deleted / inactive future path
+→ Inactive History
+```
+
+### 节点命名规则
+
+节点标题不再直接显示技术 label，而是转成人的动作：
+
+```text
+LLM document generated      -> Generated first answer
+Main answer updated         -> Saved document revision
+Selected text               -> Checked a sentence
+Selected local text         -> Followed up on local answer
+Local answer generated      -> Suggested local wording
+Created revision branch     -> Drafted alternative wording
+Merged into main document   -> Merged into document
+discarded                  -> Discarded local path
+deleted                    -> Deleted local path
+reverted                   -> Returned to earlier point
+```
+
+副标题优先显示用户真正操作的文本摘要：
+
+```text
+anchor.selectedText
+thread.selectedText
+branch.selectedText
+```
+
+如果没有可用文本，才 fallback 到更简洁的人话 label。
+
+### Edge 视觉规则
+
+Timeline 不再只有一条横线，而是根据 parent / child 关系画 SVG 曲线：
+
+```text
+同 lane 连接
+→ 表示继续同一条思路
+
+Main Path -> Local Checks
+→ 表示从主线分出去做局部检查
+
+Local / Draft -> Main Path
+→ 表示 merge back 或采用回主文档
+
+Inactive History
+→ 使用虚线和灰色弱化
+```
+
+颜色规则：
+
+```text
+blue   -> main path
+green  -> local checks
+purple -> follow-up / drafts
+amber  -> memory notes
+gray   -> inactive history
+red    -> deleted / dangerous state
+```
+
+### UI 改动
+
+`VersionTimeline` 现在使用绝对定位和 SVG edge 绘制多 lane 图。
+
+`TimelineNode` 现在显示：
+
+```text
+relation badge
+human title
+text summary
+status
+Active badge
+```
+
+左侧 `BranchLane` 改为 `Logic lanes` legend，不再只叫 branches。
+
+### Memory / LLM 影响
+
+本次修改只改变 Timeline 的前端解释和布局：
+
+```text
+不改变 EventLog
+不改变 TimelineNode 数据结构
+不改变 TimelineEdge 数据结构
+不改变 ContextSnapshot
+不改变 LLM prompt
+不改变 active path 计算
+不改变任何 memory scope
+```
+
+现有节点仍然来自 `versionNodes`，只是显示时进行 humanize 和 lane layout。
+
 ## 2026-07-06 - 顶部品牌名称改为 NOESIS
 
 ### 修改原因
@@ -7417,3 +7919,1876 @@ typecheck passed
 pnpm test 第一次在 sandbox 内仍然遇到 Windows spawn EPERM。
 提升权限重跑后通过。
 ```
+## 2026-07-06 - Timeline anchor hub and zoom controls
+
+### Change reason
+
+The timeline was still hard to read when the same selected text created several actions. Multiple nodes for the same selected sentence could appear as repeated branches, and the graph used large slots that forced horizontal scrolling before the user could understand the structure.
+
+### Updated files
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/components/timeline/VersionTimeline.tsx
+src/components/timeline/TimelineNode.tsx
+src/components/timeline/BranchLane.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### New visualization rule
+
+The timeline now separates stored event history from visual reasoning structure:
+
+```text
+Persistent EventLog / VersionNode data
+-> remains unchanged
+
+Visual timeline graph
+-> groups repeated selections into one anchor hub
+-> connects actions on the same selected text back to that hub
+-> hides duplicate anchor nodes from the visible graph
+```
+
+This means one selected text should appear once as a human-readable anchor, for example:
+
+```text
+Check: "selected sentence..."
+```
+
+Different actions on that same selection become sibling actions from the same hub:
+
+```text
+Check: "selected sentence..."
+|- Suggest: "selected sentence..."
+|- Draft: "selected sentence..."
+`- Merged back
+```
+
+This is only a visualization aggregation. It does not delete events, messages, branches, notes, memory, or database objects.
+
+### Memory and LLM context effect
+
+This change has no direct LLM memory effect.
+
+```text
+memory_scope = timeline_visualization
+memory_effect = none
+```
+
+The visual hub only changes how timeline nodes are displayed and connected. ContextSnapshot inclusion / exclusion still depends on object status, active path, merge confirmation, note scope, and deleted / discarded rules.
+
+### UI changes
+
+The timeline graph now has explicit zoom controls:
+
+```text
+-     zoom out
++     zoom in
+Fit   compresses the visible graph so more levels fit on screen
+```
+
+Mouse wheel still scrolls the timeline. It does not zoom.
+
+The node chip size and horizontal slot width were reduced so the first view can show more of the reasoning structure. Hover still shows detailed information; the visible label stays short.
+## 2026-07-06 - Timeline logical-source layout
+
+### Change reason
+
+The previous timeline still used visible event order as the horizontal position. That made related actions drift to the right by time even when they logically belonged under an earlier answer, selected text, local answer, branch, or note. The user clarified that the timeline should reflect human reasoning first; time should be secondary metadata.
+
+### Updated files
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/components/timeline/VersionTimeline.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### New layout rule
+
+The timeline now computes two display coordinates for each visible node:
+
+```text
+logicColumn
+-> horizontal logical progression
+
+stackIndex
+-> vertical offset inside the same lane and same logical column
+```
+
+`logicColumn` is not the raw event time index. It is derived from the object that the action actually acts on.
+
+### Source attachment rules
+
+```text
+document_created / document_revised / merged / reverted
+-> main path progression
+
+anchor_selected
+-> same logicColumn as its source answer / source version
+-> one level below source
+
+local_answer_generated
+-> attaches to the existing anchor hub or previous local answer in the same thread
+-> moves one logic step to the right from that source
+
+branch_created / revision_generated
+-> attaches to the previous local/thread object when available
+-> otherwise attaches to the selected text hub
+
+annotation_added / annotation_deleted
+-> attaches to the object it came from: local thread, branch, selected text hub, or raw parent fallback
+-> displays in memory lane
+
+discarded / deleted
+-> attaches to the object being discarded/deleted
+-> displays in inactive/deleted history lane
+
+merged
+-> attaches to latest branch/local-thread object when available
+-> displays as a return to the main path
+```
+
+### Visual behavior
+
+If two actions happen to the same object, they no longer appear as unrelated timeline events. They share the same source object and then branch out according to their action type.
+
+Example:
+
+```text
+Answer v1
+|
+`- Check: "selected sentence..."
+   |- Suggest: "selected sentence..."
+   |- Draft: "selected sentence..."
+   |- Saved note
+   `- Merged back -> main path
+```
+
+Multiple nodes in the same lane and same logic column use `stackIndex`, so they do not overlap.
+
+### Memory and LLM context effect
+
+This change only affects timeline visualization.
+
+```text
+memory_scope = timeline_visualization
+memory_effect = none
+```
+
+It does not delete event history, does not delete messages, does not change document versions, and does not include/exclude anything from future LLM context. ContextSnapshot behavior still follows object status, active path, note scope, merge confirmation, discarded/deleted rules, and explicit memory policy.
+## 2026-07-06 - Timeline source-parent resolver for checks
+
+### Change reason
+
+The timeline could still attach a new Check node to the latest Suggest/local answer when that Check actually came from the main answer. This happened because thread sequence was still stronger than source identity in some cases.
+
+### Updated files
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/__tests__/timeline-humanize.test.ts
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### New resolver rule
+
+Timeline parent resolution is now split conceptually:
+
+```text
+source parent
+-> the object the action is about
+
+sequence parent
+-> the previous message/action in a local conversation
+```
+
+`anchor_selected` / Check nodes must use source parent first. They do not use the latest node in a thread.
+
+### Message source mapping
+
+The visualizer now maps known message ids back to their source VersionNode ids:
+
+```text
+rev-message-assistant-{suffix}
+-> v-created-{suffix}
+-> v-main-answer-{suffix}
+
+conv-assistant-{suffix}
+-> v-created-{suffix}
+-> v-main-answer-{suffix}
+
+rev-message-regenerated-{suffix}
+-> v-main-answer-{suffix}
+-> v-created-{suffix}
+
+rev-local-message-assistant-{suffix}
+-> v-local-answer-{suffix}
+
+rev-nested-local-message-assistant-{suffix}
+-> v-local-answer-{suffix}
+
+msg-assistant-{suffix}
+-> v-local-answer-{suffix}
+```
+
+If a Check was selected from the main answer, it attaches to that main answer node even if another local thread node was created more recently.
+
+If a Check was selected from a local answer, it attaches to that local answer node.
+
+If source message metadata is missing and the Check has no source thread, it falls back to the latest main document node before the Check was created.
+
+### Regression coverage
+
+Added `src/__tests__/timeline-humanize.test.ts`.
+
+The tests cover:
+
+```text
+main-answer check after a local suggest
+-> visualParentId remains the main answer
+
+local-answer check
+-> visualParentId is the local answer
+```
+
+### Memory and LLM context effect
+
+This is still visualization-only.
+
+```text
+memory_scope = timeline_visualization
+memory_effect = none
+```
+
+No event, message, document version, note, branch, merge record, or context snapshot is deleted or changed by this resolver.
+## 2026-07-06 - Timeline edge fan routing
+
+### Change reason
+
+Several timeline edges could overlap when multiple actions shared the same source node or the same visual parent. This made the logical structure look like one thick or ambiguous line.
+
+### Updated files
+
+```text
+src/components/timeline/VersionTimeline.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### New edge routing rule
+
+The timeline now builds explicit edge routes before rendering SVG paths.
+
+```text
+visible node
+-> resolve visual parent
+-> create edge route
+-> group routes by parent node
+-> sort by target position
+-> assign fan offset
+-> render separated curved path
+```
+
+Edges from the same parent no longer share the exact same curve. Each outgoing edge receives a bounded offset.
+
+### Routing details
+
+```text
+EDGE_FAN_GAP = 16
+EDGE_FAN_LIMIT = 40
+```
+
+The offset affects:
+
+```text
+start x
+end x
+control points
+```
+
+Same-column edges use a vertical curved route with a shifted control x. Cross-column edges use shifted cubic control points.
+
+This keeps edges attached visually to their nodes while making sibling branches readable.
+
+### Memory and LLM context effect
+
+This change only affects SVG edge drawing.
+
+```text
+memory_scope = timeline_visualization
+memory_effect = none
+```
+
+It does not change EventLog, TimelineNode, document versions, active path, notes, branches, merges, or ContextSnapshot rules.
+## 2026-07-06 - Timeline port-based orthogonal edge routing
+
+### Change reason
+
+The previous fan offset still allowed edges to visually overlap because paths started near the same dot center and curved through node cards. In dense logic branches, several lines could pass through the same card area and become unreadable.
+
+### Updated files
+
+```text
+src/components/timeline/VersionTimeline.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### New routing rule
+
+Timeline edges now use port-based orthogonal routing instead of direct Bezier routing.
+
+```text
+node card
+-> exposes virtual side / bottom / top ports
+
+edge
+-> exits from a card edge
+-> travels through a side rail or mid rail
+-> enters the target card edge
+```
+
+This keeps lines out of the text card area.
+
+### Route types
+
+```text
+same-column / branch-down
+-> parent bottom port
+-> side rail
+-> child top port
+
+rightward sequence
+-> parent right port
+-> middle vertical rail
+-> child left port
+
+leftward return / back edge
+-> parent left port
+-> middle vertical rail
+-> child right port
+
+fallback overlap case
+-> top rail above both cards
+```
+
+### Offset rules
+
+Edges still receive offsets, but the offsets now affect ports and rails rather than only Bezier control points.
+
+```text
+outgoing routes from the same parent
+-> sorted by target position
+-> assigned source offset
+
+incoming routes to the same child
+-> sorted by source position
+-> assigned target offset
+```
+
+Constants:
+
+```text
+EDGE_FAN_GAP = 16
+EDGE_FAN_LIMIT = 40
+SIDE_RAIL_GAP = 28
+```
+
+### Memory and LLM context effect
+
+This is a pure SVG routing change.
+
+```text
+memory_scope = timeline_visualization
+memory_effect = none
+```
+
+It does not change timeline data, EventLog, active path, document versions, local threads, notes, branches, merges, or ContextSnapshot inclusion rules.
+
+## 2026-07-06 - Timeline lightweight logic path visualization
+
+### User request
+
+The previous timeline still looked too much like a boxed flowchart. Curved/straight edges overlapped with node cards, and some local checks appeared directly below the main answer, making them look like vertical continuations instead of user-created branch actions. The user asked for a more human-logic-oriented timeline:
+
+- no large cards for each node;
+- show only a short action label by default;
+- show details only on hover or click;
+- draw smooth forward curves instead of stiff box-routed lines;
+- place a check/selection slightly after its source answer rather than exactly below it;
+- reduce visual overlap between several actions that come from the same source.
+
+### Updated files
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/components/timeline/TimelineNode.tsx
+src/components/timeline/VersionTimeline.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### Layout rule changes
+
+Timeline layout is now closer to a logic map than a time-only row.
+
+```text
+main progress node
+-> keeps advancing on the main path
+
+selection / check node
+-> attaches to the actual source answer
+-> appears about half a step after that source answer
+-> no longer sits exactly underneath the source answer
+
+memory note
+-> stays close to its source
+-> moves a small step forward so it is readable as an action
+
+discard / delete state node
+-> appears shortly after the object it changes
+```
+
+When several nodes share the same parent and lane, the layout now gives them a small horizontal spread. This makes related actions read as sibling branches instead of stacked duplicates.
+
+### Node rendering rule changes
+
+Timeline nodes now render as:
+
+```text
+colored dot + short label
+```
+
+The visible label is intentionally short. Detailed information is moved into the hover panel:
+
+```text
+relation label
+status label
+active marker
+anchor action count
+full title
+subtitle / selected text excerpt
+folded branch reason
+timestamp
+```
+
+Clicking the dot or short label still opens the same action menu:
+
+```text
+Revert to This Node
+View Diff
+Open Related Thread
+Delete Related Answer
+```
+
+### Edge rendering rule changes
+
+Timeline edges now use smooth forward Bezier curves from dot to dot.
+
+```text
+parent dot
+-> forward curved path
+-> child dot
+```
+
+For multiple outgoing or incoming edges, the route receives a fan offset. The offset changes the curve control points so several lines do not sit on top of each other.
+
+### Memory and LLM context effect
+
+This update only changes timeline visualization.
+
+```text
+memory_scope = timeline_visualization
+memory_effect = none
+```
+
+It does not change EventLog data, active path data, document version data, local thread storage, notes, branches, merges, LLMCallRecord, ContextSnapshot, or context inclusion/exclusion rules.
+
+## 2026-07-06 - Timeline semantic lanes and forward-curve action routing
+
+### User correction
+
+The previous compact timeline still placed different operations too close together. The user clarified that operations should live in different semantic layers, but edges should not fall vertically downward. Each operation should move slightly forward with a detailed curve:
+
+```text
+Answer -> Check
+Check -> Ask
+Ask -> Suggest
+```
+
+`Local Question -> Suggest` should mainly move to the right because it is the answer generated from the local question.
+
+### Updated files
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/components/timeline/TimelineNode.tsx
+src/components/timeline/VersionTimeline.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### New lane rules
+
+Timeline lanes are now based on user-visible action semantics instead of generic numeric depth labels:
+
+```text
+Main Path
+-> document answers, document versions, revert points
+
+Checks
+-> selected text / check actions
+
+Local Questions
+-> user questions about selected text
+
+Suggestions
+-> local LLM answers and suggested wording
+
+Drafts
+-> branches and draft revisions
+
+Merge Back
+-> confirmed merges returning to the main document
+
+Memory Notes
+-> explicit notes
+
+Inactive History
+-> hidden inactive / discarded / deleted history when enabled
+```
+
+### New position rules
+
+Nodes still attach to their real logical source object, but their x-position is determined by action type:
+
+```text
+Check
+-> parent column + small forward step
+
+Ask
+-> check column + small forward step
+
+Suggest
+-> ask column + larger rightward step
+
+Draft
+-> suggest column + forward step
+
+Merge
+-> returns toward the main path visually through the merge lane
+```
+
+This keeps operations separated by lane while preserving the feeling that every step moves forward.
+
+### Label visibility rules
+
+Timeline nodes remain lightweight:
+
+```text
+dot + short label
+```
+
+The short label now uses a subtle background without a border so curves do not visually cut through the text. Full source text, relation labels, status, and timestamps remain in hover/click details.
+
+### Memory and LLM context effect
+
+This is a visualization-only update.
+
+```text
+memory_scope = timeline_visualization
+memory_effect = none
+```
+
+It does not change stored events, timeline nodes, active path state, document versions, local thread state, notes, branches, merges, LLM calls, or ContextSnapshot inclusion rules.
+
+## 2026-07-06 - Timeline branch-row layout by check/thread
+
+### User correction
+
+The previous semantic-lane timeline was still wrong because it treated `Check`, `Ask`, and `Suggest` as different vertical layers. The corrected model is:
+
+```text
+Main answer
+  -> Check A -> Ask/Suggest/Draft/Merge...
+  -> Check B -> Ask/Suggest/Draft/Merge...
+
+Check A's suggestion
+  -> nested Check A.1 -> Ask/Suggest/Draft...
+```
+
+The vertical axis now represents separate local revision paths. The horizontal axis represents progress inside the same local path.
+
+### Updated files
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/components/timeline/VersionTimeline.tsx
+src/components/timeline/TimelineNode.tsx
+src/components/timeline/BranchLane.tsx
+src/__tests__/timeline-humanize.test.ts
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### New row rules
+
+Timeline rows are now dynamic.
+
+```text
+row-main
+-> main document path only
+
+row-anchor-{anchor/check id}
+-> one row per check / selected-text local revision path
+
+row-memory
+-> explicit notes when enabled
+
+row-inactive
+-> inactive, discarded, or deleted history when enabled
+```
+
+Every check creates or reuses a row keyed by its anchor/check identity. All operations that belong to that check stay on the same row:
+
+```text
+Check -> Ask -> Suggest -> Draft -> Merge proposal
+```
+
+Nested checks create child rows under the parent check row. Their source parent remains the actual local answer or suggestion node, not the main answer.
+
+### Row ordering rules
+
+Rows are ordered as a tree:
+
+```text
+Main Path
+  Check 1
+    Nested Check
+  Check 2
+  Check 3
+Memory Notes
+Inactive History
+```
+
+This keeps nested local reasoning visually near the parent branch instead of grouping all checks, all questions, or all suggestions together.
+
+### Label placement rules
+
+The visible label is no longer placed on the line height.
+
+```text
+label
+dot ------ edge
+```
+
+The dot remains the routing point. The short label sits above and to the right of the dot with a subtle white background, so horizontal branch edges do not run through text. Hover/click details still contain full text and metadata.
+
+### Test coverage
+
+The timeline humanize tests now verify:
+
+```text
+source answer checks attach to the source answer
+same-check suggestion stays in the same row as its check
+different checks from the same answer use different rows
+nested checks from local answers create a different child row
+```
+
+### Memory and LLM context effect
+
+This is still a visualization-only update.
+
+```text
+memory_scope = timeline_visualization
+memory_effect = none
+```
+
+It does not change EventLog records, TimelineNode storage, active path state, document versions, local thread state, notes, branches, merges, LLM calls, or ContextSnapshot inclusion rules.
+
+## 2026-07-06 - Timeline tooltip pinning and hover stability
+
+### User request
+
+Timeline details were visually useful, but the hover card could flicker near the edge of a node because the card appeared and disappeared as the mouse crossed the hover boundary. The user requested a way to make the detail card stay open:
+
+```text
+right click node -> keep detail card visible
+click again / close -> hide detail card
+```
+
+### Updated files
+
+```text
+src/components/timeline/TimelineNode.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### Interaction rules
+
+Timeline node details now use React state instead of pure CSS `group-hover`.
+
+```text
+mouse enter
+-> show details
+
+mouse leave
+-> wait briefly, then hide details
+
+right click node
+-> pin / unpin details
+
+left click pinned node
+-> close pinned details
+
+click X in pinned card
+-> close pinned details
+```
+
+The brief leave delay reduces edge flicker when the cursor moves between the node label and the detail card.
+
+### Memory and LLM context effect
+
+This is a UI-only change.
+
+```text
+memory_scope = timeline_visualization
+memory_effect = none
+```
+
+It does not change EventLog, TimelineNode storage, active path state, document versions, local threads, notes, branches, merges, LLM calls, or ContextSnapshot inclusion rules.
+
+### Follow-up fix
+
+Pinned and hovered timeline detail cards now use a higher z-index than timeline nodes and SVG edges.
+
+```text
+hovered / pinned node container -> z-[80]
+detail card / action menu -> z-[90]
+```
+
+This ensures the detail card visually covers nearby labels and lines instead of being covered by them.
+
+### Follow-up interaction change
+
+Left click no longer opens a persistent timeline box.
+
+```text
+left click normal node
+-> no persistent box
+-> keeps only the temporary hover detail behavior
+
+left click pinned node
+-> closes the pinned detail card
+
+right click node
+-> still pins / unpins the detail card
+```
+
+This keeps persistent details reserved for the explicit right-click action.
+
+### Follow-up correction
+
+The left-click behavior was corrected again:
+
+```text
+left click node
+-> opens / closes the original action menu
+-> does not pin the detail page
+-> clears any hover or pinned detail page first
+
+right click node
+-> pins / unpins the detail page
+```
+
+This separates the two interactions clearly: left click is for actions, right click is for persistent details.
+
+## 2026-07-06 - Timeline main path separation and state visuals
+
+### User request
+
+The timeline should primarily show human reasoning logic rather than flattening every action onto one time line. The user also pointed out that deleted or discarded local work should visibly change the line / dot state instead of looking like a normal active branch.
+
+### Updated files
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/components/timeline/VersionTimeline.tsx
+src/__tests__/timeline-humanize.test.ts
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### Main path rule
+
+The main path now represents only accepted global document movement:
+
+```text
+document_created
+document_revised
+reverted
+```
+
+Local actions no longer become part of the main row just because they happened later in time.
+
+When a normal main answer / manual document update is created after local work, the timeline display connects it to the latest previous main-path document node. This prevents the main path from accidentally appearing to continue from a local suggestion.
+
+### Merge-back rule
+
+If a document revision is created from a real merge node, the display keeps that relationship:
+
+```text
+local check / suggestion
+-> merge action in local row
+-> new document version on main path
+```
+
+So the merge action itself stays in the local branch row, while the resulting document version lands back on the main path.
+
+### Discard / Delete visual rule
+
+Discarded and deleted objects stay attached to the affected local row when they have related anchor/thread/branch ids.
+
+```text
+discarded local thread
+-> same local check row
+-> amber dot / amber row tint
+-> dashed lower-opacity edge
+
+deleted local thread
+-> same local check row
+-> red dot / red row tint
+-> dashed lower-opacity edge
+```
+
+This makes the state change visible without pretending the discarded/deleted object is a new logical branch.
+
+### Test coverage
+
+The timeline humanize tests now verify:
+
+```text
+checks from main answers attach to their source answer
+checks from local answers attach to the source local answer
+main answers after local work stay on the main path
+merge nodes stay in the local row while the document version merges back
+discarded and deleted nodes stay in the affected local row with the right tone
+```
+
+### Memory and LLM context effect
+
+This update is timeline visualization logic only.
+
+```text
+memory_scope = timeline_visualization
+memory_effect = none
+```
+
+It does not change EventLog records, TimelineNode persistence, active path storage, document versions, local thread state, annotations, merge records, LLM calls, or ContextSnapshot inclusion / exclusion rules.
+
+## 2026-07-06 - Timeline answer naming and removed-path visibility
+
+### User request
+
+The timeline showed some main answer continuation nodes as:
+
+```text
+Saved revision
+```
+
+This was confusing because the user was continuing the main answer conversation, not explicitly saving a manual revision. The user also noted that there was no clear option for hiding deleted branches.
+
+### Updated files
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/components/timeline/BranchLane.tsx
+src/components/timeline/VersionTimeline.tsx
+src/__tests__/timeline-humanize.test.ts
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### Naming rule
+
+Main answer nodes now use action-oriented names instead of internal version numbers:
+
+```text
+Initial response
+Follow-up response
+```
+
+This keeps main chat continuation understandable as a user action instead of exposing internal sequence labels like `v1`, `v2`, or `v3`.
+
+Manual document versions still keep document wording:
+
+```text
+Edited document
+Merged local change
+Updated document
+```
+
+### Removed paths visibility rule
+
+The timeline sidebar now has a removed-path toggle:
+
+```text
+Show removed paths (N)
+Hide removed paths (N)
+```
+
+Removed paths mean timeline rows affected by:
+
+```text
+discarded
+deleted
+```
+
+By default, removed paths are hidden so the main reasoning map does not stay cluttered with deleted or discarded local branches. Turning the option on restores those rows with their existing amber/red styling and dashed edges.
+
+If a deleted/discarded row has nested follow-up rows, the nested rows are folded with it. This prevents orphaned child rows from appearing without their deleted parent branch.
+
+### Test coverage
+
+The timeline humanize tests now verify:
+
+```text
+main answer continuation is named Follow-up response instead of Saved revision
+removed paths are hidden when showRemovedPaths = false
+removed paths return when showRemovedPaths = true
+main path nodes remain visible while removed local rows are hidden
+```
+
+### Memory and LLM context effect
+
+This is still a visualization-only change.
+
+```text
+memory_scope = timeline_visualization
+memory_effect = none
+```
+
+It does not delete timeline records, local threads, messages, branches, EventLog records, TimelineNodes, document versions, LLM calls, or ContextSnapshot data. Hidden removed paths are only hidden from the current visual timeline view.
+
+## 2026-07-06 - Timeline content-aware labels
+
+### User request
+
+The user clarified that timeline labels should not be generic names such as:
+
+```text
+Initial response
+Follow-up response
+Answer v1
+Answer v2
+```
+
+Every short label should make clear what the step is about.
+
+### Updated files
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/components/timeline/VersionTimeline.tsx
+src/__tests__/timeline-humanize.test.ts
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### Label rule
+
+Timeline nodes now use:
+
+```text
+action: content topic
+```
+
+Examples:
+
+```text
+Answered: What is Quanzhou?
+Follow-up: Add more about Quanzhou history
+Check: Quanzhou is a major coastal city...
+Suggest: Can this sentence be more specific...
+Edited: Quanzhou overview
+Merge: historic port sentence
+Delete: local check on Quanzhou history
+```
+
+### Data sources used
+
+The title generator now reads real workspace context instead of relying only on fixed node labels.
+
+```text
+main answer nodes
+-> user conversation message matched by node id suffix
+-> fallback to document title
+
+check nodes
+-> selected anchor text
+
+local answer nodes
+-> local user question matched by node id suffix
+-> fallback to local answer text
+-> fallback to selected text
+
+edit / merge / delete / discard nodes
+-> selected text, local answer, document title, or user question depending on source
+```
+
+### Detail subtitle rule
+
+The one-line label remains short. Hover details now preserve fuller context, for example:
+
+```text
+User asked: ...
+User followed up: ...
+Selected text: ...
+Local question: ...
+Affected branch: ...
+```
+
+This keeps the visual graph readable while still letting the user inspect the exact source.
+
+### Test coverage
+
+The timeline humanize tests now verify:
+
+```text
+main answer title uses the user prompt
+follow-up answer title uses the follow-up prompt
+local suggestion title uses the local question
+removed-path hiding still works with content-aware labels
+```
+
+### Memory and LLM context effect
+
+This is a visualization-only change.
+
+```text
+memory_scope = timeline_visualization
+memory_effect = none
+```
+
+It does not change EventLog, TimelineNode storage, local threads, messages, document versions, LLM calls, or ContextSnapshot inclusion rules.
+
+## 2026-07-06 - Timeline impact previews and path-aware chat visibility
+
+### User request
+
+The user clarified that timeline operations should affect more than the visual node. Revert should switch the active memory path, while later chat and workspace objects should become inactive rather than being physically deleted. Delete should also be explicit and preview its effect before changing related messages or local work.
+
+### Updated files
+
+```text
+src/components/timeline/TimelineNode.tsx
+src/components/timeline/TimelineImpactDialog.tsx
+src/components/timeline/VersionTimeline.tsx
+src/components/document/MainDocumentPanel.tsx
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### Timeline node menu
+
+The node menu now uses preview-oriented actions:
+
+```text
+View Details
+View Context Impact
+Preview Revert
+View Diff
+Open Related Thread
+Preview Delete
+```
+
+This makes destructive or path-changing behavior explicit before the user confirms anything.
+
+### Revert preview
+
+Preview Revert now shows:
+
+```text
+target node
+current status
+future active nodes that would become inactive
+related threads / selections
+memory effect
+warnings
+```
+
+Confirming still calls the existing `revertToNode` flow. The dialog explains that records are not physically removed; later nodes become inactive and should be excluded from future LLM context.
+
+### Delete preview
+
+Preview Delete now shows affected related objects and memory effect.
+
+Current confirm behavior is intentionally conservative:
+
+```text
+node with related local thread
+-> can confirm using existing local-answer delete flow
+
+main answer / document / node without related local thread
+-> confirm disabled
+-> dialog explains that full timeline.node.delete cascade action is still required
+```
+
+This avoids pretending a full cascade delete exists before the data layer can update messages, selections, local threads, annotations, branches, comparisons, context cache, and timeline status together.
+
+### Context impact preview
+
+View Context Impact explains whether a node is currently active, inactive, discarded, or deleted from the perspective of future LLM context.
+
+Examples:
+
+```text
+active path -> eligible for context if scope matches
+inactive path -> excluded because inactive_path_excluded
+discarded -> excluded because discarded_excluded_by_default
+deleted -> excluded because deleted_memory_never_included
+```
+
+### Path-aware main chat visibility
+
+The main chat now has a path visibility control:
+
+```text
+Active
+Inactive
+Removed
+All
+```
+
+Messages are classified from their related timeline node:
+
+```text
+active
+-> normal display
+-> default visible path
+
+inactive
+-> gray display
+-> excluded from current memory path
+
+discarded
+-> amber display
+-> removed view
+
+deleted
+-> red placeholder
+-> body hidden as [deleted message]
+```
+
+The default chat view is active only, so a revert can make old future-path messages disappear from the normal conversation without physically deleting them.
+
+### Memory and LLM context effect
+
+This update improves UI semantics and visibility. It does not yet implement the full backend cascade action for arbitrary timeline node deletion.
+
+```text
+memory_scope = timeline_visualization + chat_visibility
+memory_effect = visible_state_explanation
+```
+
+Actual context exclusion still depends on the existing active path, deleted status, discarded status, and context builder rules.
+
+## 2026-07-06 - Revert focus reconciliation for selections and comparison windows
+
+### User request
+
+After returning to an earlier timeline point, the active selection and Semantic Difference Map were still visible even though they belonged to the later path. The expected behavior is that reverting changes the current workspace focus: stale selected text, local windows, merge/diff state, and comparison panels should close or clear when their source object is no longer on the active path.
+
+### Updated files
+
+```text
+src/store/useAnswerAtlasStore.ts
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### New reconciliation rule
+
+`revertToNode` now runs a workspace focus reconciliation after the active document version / timeline node checkout finishes.
+
+The reconciliation checks the active-path state of these focused objects:
+
+```text
+selected anchor / selected text
+selected local thread
+active Semantic Difference Map window
+active context review focus
+active revision branch
+active merge record
+pending merge diff / conflict modal
+```
+
+If the focused object is deleted, discarded, or attached to an inactive future path, the UI focus is cleared.
+
+Anchor and local-thread checks include a small visited-object guard because legacy or nested local data can contain cross references such as:
+
+```text
+anchor -> sourceThreadId
+thread -> anchorId
+```
+
+The guard prevents a malformed or cyclic relation from blocking a timeline revert.
+
+### UI behavior after revert
+
+When the user reverts to an earlier node:
+
+```text
+selection from later path -> cleared
+side thread from later path -> closed
+Semantic Difference Map from later path -> closed
+expanded comparison state -> collapsed
+pending merge/diff from later path -> closed
+context preview -> refreshed against the new active path
+```
+
+This does not physically delete the selection, thread, comparison, merge record, or messages. It only removes them from the current active workspace focus so the screen matches the active timeline path.
+
+### Memory behavior
+
+The memory rule is unchanged but now reflected more consistently in UI state:
+
+```text
+active path object -> may remain focused if still relevant
+inactive path object -> removed from active UI focus
+discarded object -> excluded from active UI focus and default context
+deleted object -> excluded from active UI focus and never included in future context
+```
+
+`refreshContextPreview()` still runs after the revert, so the context preview follows the new active document version and selected focus, if any.
+
+## 2026-07-06 - Revision Logic Map and logic-focus routing
+
+### User request
+
+The user clarified that this module should not be understood as a simple Timeline. It should reflect human revision logic. A local conversation under one selected sentence does not always mean every later question belongs to the same issue. The user may discuss one issue, move to another issue, then return to the earlier issue later.
+
+### Updated files
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/components/timeline/VersionTimeline.tsx
+src/components/timeline/BranchLane.tsx
+src/components/timeline/TimelineNode.tsx
+src/components/timeline/TimelineImpactDialog.tsx
+src/components/thread/RevisionExplorerPanel.tsx
+src/__tests__/timeline-humanize.test.ts
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### Naming update
+
+The visible UI language now shifts from timeline wording to logic-map wording:
+
+```text
+Version Timeline -> Revision Logic Map
+Timeline view -> Logic map
+Main Path -> Main Reasoning
+Check row -> Logic focus
+Preview Revert -> Preview Return
+Return to This Point -> Return to This Logic Point
+```
+
+This is meant to make clear that the graph is organized around reasoning and revision intent, not raw time order.
+
+### Logic focus rule
+
+The graph now separates two concepts:
+
+```text
+selected source
+-> the text / answer fragment the user selected
+
+logic focus
+-> the concrete issue being discussed about that source
+```
+
+Example:
+
+```text
+Selected source: "Quanzhou was one of the world's busiest ports."
+  Logic 1: tone / certainty
+  Logic 2: evidence / examples
+  Logic 3: context / background
+```
+
+This means the same selected sentence can create multiple independent logic rows.
+
+### Lightweight focus classification
+
+For now, logic focus is inferred without another LLM call. The visualizer reads the local question and assigns a stable focus key using explainable patterns:
+
+```text
+tone / certainty
+evidence / examples
+context / background
+precision / clarity
+structure / flow
+wording / rewrite
+brevity
+```
+
+If no pattern matches, it falls back to a stable text signature based on the question. This keeps the graph fast and deterministic.
+
+### New start vs resume behavior
+
+Local answer nodes no longer attach to the latest message in the same local window by default.
+
+The new resolver checks:
+
+```text
+same selected source + new logic focus
+-> start a separate logic row from the selected source
+
+same selected source + previously seen logic focus
+-> resume that earlier logic row
+
+branch / merge / discard / delete / note with no new question
+-> inherit the current thread's latest logic focus
+```
+
+Example:
+
+```text
+Source sentence
+  Logic A: tone
+    Suggest A1
+  Logic B: evidence
+    Suggest B1
+  Logic A: tone resumed
+    Suggest A2
+```
+
+The resumed node receives a `resumed` badge in hover details.
+
+### Visual behavior
+
+Source selection nodes are now labeled as `Source: ...` instead of pretending every selection is already one logical check.
+
+Logic rows are titled with the inferred focus:
+
+```text
+Logic 1: tone / certainty
+Logic 2: evidence / examples
+Logic 3: precision / clarity
+```
+
+Hover details can show:
+
+```text
+logic focus label
+new logic
+resumed
+source text
+status
+context impact
+```
+
+### Return / revert semantics
+
+The UI copy now says return to a logic point, not revert a timeline node. The underlying action still calls the existing `revertToNode` flow for now, but the explanation is logic-path-oriented:
+
+```text
+affected logic path becomes inactive
+records are not physically deleted
+inactive logic can still be viewed and returned to later
+context preview follows the new active path
+```
+
+### Memory and LLM context effect
+
+This update changes visual grouping and UI wording. It does not yet create a persisted `LogicFocus` data model and does not directly change ContextSnapshot inclusion rules.
+
+```text
+memory_scope = revision_logic_visualization
+memory_effect = none
+```
+
+Future data-layer work should persist logic focus ids so LLM context can include:
+
+```text
+current logic focus history
+current selected source
+active document version
+active scoped notes
+```
+
+and exclude:
+
+```text
+other independent logic focuses
+inactive returned-from paths
+discarded objects
+deleted objects
+unconfirmed merges
+unmerged branches
+```
+
+### Test coverage
+
+`src/__tests__/timeline-humanize.test.ts` now verifies:
+
+```text
+same selected text + different local questions -> separate logic rows
+later question returning to earlier focus -> resumes earlier logic row
+source selection remains separate from logic focus rows
+merge / delete / discard attach to the affected logic row
+removed logic can be hidden without deleting the source selection
+```
+
+## 2026-07-06 - Main reasoning connection fix and question labels
+
+### User request
+
+The user pointed out two issues in the Revision Logic Map:
+
+```text
+1. The first main reasoning point was not connected to the following main point.
+2. The first main point was labeled "Answered", but it visually represents the user's question.
+```
+
+### Updated files
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/__tests__/timeline-humanize.test.ts
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### Connection fix
+
+The graph previously sorted version nodes only by `createdAt`. When two main reasoning points had the same timestamp or extremely close generated timestamps, the follow-up could be processed before its parent. That meant it had no previous main node available in the visual resolver, so the first edge was missing.
+
+The visualizer now uses a deterministic comparator:
+
+```text
+createdAt
+parent before child
+node type rank
+id fallback
+```
+
+This ensures the first main question node is processed before its follow-up, so the edge is created.
+
+### Label fix
+
+Main reasoning labels now describe the user's question:
+
+```text
+document_created -> Question: ...
+main answer update -> Follow-up question: ...
+```
+
+This avoids implying that the node itself is the assistant answer. The assistant answer remains the generated content behind that reasoning point.
+
+### Test coverage
+
+Added a regression test for equal timestamps:
+
+```text
+document_created and document_revised with the same createdAt
+-> document_created is processed first
+-> document_revised visualParentId points to document_created
+-> both remain in the main reasoning row
+```
+
+### Memory and LLM context effect
+
+This change only affects visual ordering and labels.
+
+```text
+memory_scope = revision_logic_visualization
+memory_effect = none
+```
+
+No messages, document versions, events, timeline records, or context snapshots are deleted or rewritten.
+
+## 2026-07-06 - Revision Logic Map manual logic assignment and compact labels
+
+### User request
+
+The user clarified that automatic logic grouping can be wrong, especially when a follow-up belongs to an earlier topic or when two checks are about different parts of the same answer. They also asked that the text shown directly on graph nodes should be shorter and topic-aware, not generic labels such as `Answer v1` or `Saved revision`.
+
+### Updated files
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/components/timeline/TimelineNode.tsx
+src/components/timeline/VersionTimeline.tsx
+src/store/useAnswerAtlasStore.ts
+src/__tests__/timeline-humanize.test.ts
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### New persistent UI state
+
+Added `logicAssignments` to the project snapshot and persisted workspace state.
+
+```text
+logicAssignments[node_id] = {
+  nodeId,
+  logicFocusKey,
+  logicFocusLabel,
+  targetNodeId,
+  source = user,
+  assignmentType = user_new | user_previous,
+  reason,
+  createdAt,
+  updatedAt
+}
+```
+
+This is project-scoped. Switching projects also switches the correction map, so one project's logic corrections do not affect another project.
+
+### Logic assignment flow
+
+The graph now resolves logic focus in this order:
+
+```text
+1. If the node has a user logic assignment, use it.
+2. Otherwise infer the logic focus from local question / selected text / local answer.
+3. Otherwise inherit the current thread focus.
+```
+
+The node menu now includes:
+
+```text
+Start Separate Logic
+Move to Previous Logic
+```
+
+`Start Separate Logic` creates a new user logic key for that node. `Move to Previous Logic` finds the nearest previous logic point with the same anchor/thread scope and connects the node back to that focus. The correction is visual and structural for the graph; it does not rewrite messages, document versions, LLM calls, or context snapshots.
+
+### Compact node labels
+
+Graph nodes now use `shortTitle` for the visible inline label:
+
+```text
+Q: user prompt
+Follow-up: user prompt
+Source: selected text
+Check: local question
+Answer: local answer / local question
+Note: saved note
+Draft: branch draft
+Revise: revision draft
+Merge: adopted change
+Return: revert point
+```
+
+The full title and subtitle remain available in hover/right-click details. This keeps the graph readable while preserving enough detail for inspection.
+
+### Chinese logic matching
+
+Added Unicode-safe Chinese keyword rules before the old fallback rules for:
+
+```text
+tone / certainty
+evidence / examples
+context / background
+precision / clarity
+structure / flow
+wording / rewrite
+brevity
+```
+
+This avoids the previous mojibake issue where Chinese logic keywords could fail to match reliably.
+
+### Memory and LLM context effect
+
+```text
+memory_scope = revision_logic_visualization
+memory_effect = none
+```
+
+These assignments affect graph grouping, lane placement, and visual parent links only. They do not enter LLM context as content memory and do not change deleted/discarded/inactive memory rules.
+
+## 2026-07-06 - Main chat failure visibility and API model range fix
+
+### User request
+
+The user observed that the main answer window showed several user messages but no assistant answer after the app appeared to think.
+
+### Root cause
+
+The main send flow saved the user message before calling `/api/llm/generate-document`.
+
+```text
+save user message
+-> create context snapshot
+-> create started LLMCallRecord
+-> call LLM API
+-> append assistant message only if API succeeds
+```
+
+If the LLM API failed after the user message was saved, the catch block only reset `isGeneratingDocument`.
+
+```text
+catch {
+  isGeneratingDocument = false
+}
+```
+
+So the UI showed the user message but never showed an assistant response or failure reason.
+
+### Model range issue
+
+The model catalog also prioritized `gpt-5.5` by prepending it to the model list. That could make the frontend display a model even if the OpenAI `/v1/models` response did not include it for the current API key.
+
+This violated the intended rule:
+
+```text
+Only show models that the provided API key can actually use.
+```
+
+### Fix
+
+The model catalog now only prioritizes `gpt-5.5` if it is actually present in the model list. In mock fallback mode, `gpt-5.5` remains available as a demo model.
+
+Main chat failure handling now creates a visible assistant failure message:
+
+```text
+includeInContext = false
+contentState = normal
+role = assistant
+```
+
+The failure message is visible to the user but does not enter future LLM context.
+
+The revision foundation also records:
+
+```text
+LLMCallRecord.status = failed
+EventLog: llm.call.failed
+TimelineNode: Assistant response failed
+memory_effect = excluded
+```
+
+The active reasoning path remains at the user message so the user can retry or change model.
+
+### Memory and LLM context effect
+
+```text
+failed assistant UI message -> excluded from LLM context
+failed revision message -> includeInContext = false
+failed LLMCallRecord -> recorded for debugging
+```
+
+No existing user messages, assistant messages, document versions, notes, branches, selections, or comparison graphs are deleted.
+
+## 2026-07-06 - Main-message Revision Logic Router v1
+
+### User request
+
+The user pointed out that chronological main-chat messages should not always form one logic chain. Example:
+
+```text
+Q: 说说我爱你
+Q: ICLR 截稿日期
+```
+
+These are adjacent in time but unrelated in revision logic, so the Logic Map should not draw a continuation edge between them. The user also clarified that later messages can return to an older logic node, so the structure must be a graph, not a linear topic chain.
+
+### Updated files
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/components/timeline/TimelineNode.tsx
+src/components/timeline/VersionTimeline.tsx
+src/__tests__/timeline-humanize.test.ts
+ANSWER_ATLAS_IMPLEMENTATION_LOG.md
+```
+
+### New rule
+
+Main conversation nodes now go through a lightweight `routeMainLogicNode` step before the graph chooses a visual parent.
+
+The router decides:
+
+```text
+new_root
+continue
+return_to
+merge_back
+```
+
+The key change is:
+
+```text
+time adjacency does not create a logic edge by itself
+```
+
+If no return signal, continuation signal, or shared core terms are found, the main question becomes a new logic root.
+
+### Signal extraction
+
+The router extracts lightweight logic tokens from each main prompt:
+
+```text
+English words and acronyms
+Chinese two-character phrases
+explicit return signals
+explicit continuation signals
+```
+
+Examples:
+
+```text
+说说我爱你
+-> tokens include 我爱 / 爱你
+
+ICLR 截稿日期
+-> tokens include iclr / 截稿 / 日期
+
+回到刚才那个我爱你
+-> return signal + tokens matching 我爱 / 爱你
+```
+
+### Routing priority
+
+The first implemented priority order is:
+
+```text
+1. document_created -> new_root
+2. merge-created document version -> merge_back
+3. explicit return signal + matching old node -> return_to old node
+4. shared core tokens with old node -> continue that node
+5. explicit continuation signal -> continue latest main node
+6. otherwise -> new_root
+```
+
+This is intentionally conservative. It avoids drawing a wrong edge when the system cannot justify a logical relation.
+
+### Visual behavior
+
+For a new root:
+
+```text
+visualParentId = null
+logicRelationType = new_root
+visible label = Q: ...
+```
+
+The renderer now treats `visualParentId = null` as an explicit no-edge decision. It no longer falls back to the chronological `node.parentId`.
+
+For a return:
+
+```text
+visualParentId = earlier matching main node
+logicRelationType = return_to
+```
+
+Hover details show the router reason and confidence so the decision is inspectable.
+
+### Regression tests
+
+Added tests for:
+
+```text
+说说我爱你 -> ICLR 截稿日期
+=> second question is new_root, no visual parent
+
+ICLR 截稿日期 -> 那投稿格式呢？
+=> second question continues the ICLR node
+
+说说我爱你 -> ICLR -> 投稿格式 -> 回到刚才那个我爱你
+=> final question returns to the earlier 我爱你 node
+
+merge_back document versions
+=> still attach to merge node, not the main-message router
+```
+
+### Memory and LLM context effect
+
+```text
+memory_scope = revision_logic_visualization
+memory_effect = none
+```
+
+This change affects the visual Logic Map and node parent rendering only. It does not delete messages, rewrite conversation history, change document versions, change EventLog, or include/exclude items from LLM context. Future work can persist these router decisions as first-class `LogicAssignment` records or replace the lightweight router with a trained relation classifier.
+
+## 2026-07-06 - Logic-parent layout for returning main topics
+
+### User-facing issue
+
+The Revision Logic Map still looked too chronological in mixed-topic main chat sessions. A case like:
+
+```text
+Q: Say I love you
+Q: ICLR submission deadline
+Follow-up: CVPR submission deadline
+Q: Do you know the World Cup?
+Follow-up: AAAI submission deadline
+```
+
+should not place the AAAI question after the unrelated World Cup question. Logically, AAAI belongs to the conference-deadline chain, so it should be laid out after the CVPR node and connected to CVPR.
+
+### Change
+
+Main-path layout now uses the resolved logical parent as the horizontal anchor:
+
+```text
+new_root -> column 0 on its own root track
+continue / return_to -> parent logicColumn + 1
+merge_back -> keep the merge source parent
+```
+
+Chronological order still sorts siblings, but it no longer decides the visual parent or horizontal position for a returned topic.
+
+### Root tracks
+
+Independent main questions now get separate root tracks inside the main reasoning lane:
+
+```text
+conference deadline chain:
+ICLR -> CVPR -> AAAI
+
+unrelated root:
+World Cup
+```
+
+The unrelated root no longer captures later nodes that are routed back to an earlier topic.
+
+### Token cleanup
+
+The lightweight topic router now ignores generic conversation words such as:
+
+```text
+you
+your
+me
+my
+do
+does
+did
+know
+say
+tell
+```
+
+This prevents false matches like:
+
+```text
+Say I love you
+Do you know the World Cup?
+```
+
+from being treated as one logic chain just because they share generic dialogue words.
+
+### Regression test
+
+Added a test that verifies:
+
+```text
+ICLR -> CVPR
+World Cup -> new independent root
+AAAI -> returns to CVPR, not World Cup
+```
+
+The test also checks that AAAI appears one logical column after CVPR, and that World Cup uses a separate root track.
+
+### Memory and LLM context effect
+
+```text
+memory_scope = revision_logic_visualization
+memory_effect = none
+deleted_data = none
+```
+
+This change only affects Revision Logic Map routing and layout. It does not delete messages, change document versions, alter EventLog records, or change which memories enter future LLM context.

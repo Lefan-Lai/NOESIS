@@ -49,6 +49,21 @@ type CompleteMainSendInput = {
   suffix: string;
 };
 
+type FailMainSendInput = {
+  state: RevisionRepositoryState;
+  projectId: string;
+  conversationId: string;
+  prompt: string;
+  errorMessage: string;
+  model: string;
+  provider?: "openai" | "mock";
+  llmCallId: string;
+  contextSnapshotId: string;
+  userTimelineNodeId: string;
+  now: string;
+  suffix: string;
+};
+
 function activeProject(projectId: string, name: string | undefined, now: string): ProjectModel {
   return {
     id: projectId,
@@ -520,6 +535,119 @@ export class MainConversationRevisionService {
           ? [withDocumentVersion.timelineEdge]
           : [])
       ]
+    };
+  }
+
+  static failMainSend(input: FailMainSendInput): {
+    state: RevisionRepositoryState;
+    assistantMessage: MessageModel;
+    llmCallRecord: LLMCallRecord;
+    events: EventLogRecord[];
+    timelineNodes: RevisionTimelineNode[];
+    timelineEdges: RevisionTimelineEdge[];
+  } {
+    const assistantMessage: MessageModel = {
+      id: `rev-message-assistant-failed-${input.suffix}`,
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      role: "assistant",
+      content: input.errorMessage,
+      status: "failed",
+      memoryScope: "conversation",
+      includeInContext: false,
+      model: input.model,
+      llmCallId: input.llmCallId,
+      createdAt: input.now,
+      payload: {
+        prompt: input.prompt
+      }
+    };
+    const previousCall = input.state.llmCallRecords[input.llmCallId];
+    const llmCallRecord: LLMCallRecord = {
+      ...previousCall,
+      id: input.llmCallId,
+      projectId: input.projectId,
+      callType: previousCall?.callType ?? "main_conversation",
+      purpose: previousCall?.purpose ?? "general_followup",
+      model: input.model,
+      provider: input.provider,
+      status: "failed",
+      prompt: previousCall?.prompt ?? input.prompt,
+      contextSnapshotId: input.contextSnapshotId,
+      sessionId: previousCall?.sessionId ?? input.conversationId,
+      outputMessageId: assistantMessage.id,
+      createdAt: previousCall?.createdAt ?? input.now,
+      completedAt: input.now,
+      metadata: {
+        ...(previousCall?.metadata ?? {}),
+        errorMessage: input.errorMessage
+      }
+    };
+    const failedEventResult = EventService.createEventWithTimelineNode(
+      input.state,
+      {
+        id: `event-llm-failed-${input.suffix}`,
+        projectId: input.projectId,
+        eventType: "llm.call.failed",
+        objectType: "llm_call",
+        objectId: input.llmCallId,
+        actor: "system",
+        timestamp: input.now,
+        payload: {
+          model: input.model,
+          provider: input.provider,
+          outputMessageId: assistantMessage.id,
+          errorMessage: input.errorMessage
+        }
+      },
+      {
+        id: `timeline-assistant-failed-${input.suffix}`,
+        conversationId: input.conversationId,
+        parentNodeId: input.userTimelineNodeId,
+        label: "Assistant response failed",
+        model: input.model,
+        memoryScope: "conversation",
+        memoryEffect: "excluded",
+        status: "failed",
+        createdContentRef: assistantMessage.id,
+        affectedContextRefs: [input.contextSnapshotId],
+        payload: {
+          llm_call_id: input.llmCallId,
+          context_snapshot_id: input.contextSnapshotId,
+          error_message: input.errorMessage
+        }
+      },
+      {
+        id: `timeline-edge-${input.userTimelineNodeId}-timeline-assistant-failed-${input.suffix}`,
+        sourceNodeId: input.userTimelineNodeId,
+        edgeType: "sequence",
+        status: "failed"
+      }
+    );
+    const nextState: RevisionRepositoryState = {
+      ...input.state,
+      revisionMessages: {
+        ...input.state.revisionMessages,
+        [assistantMessage.id]: assistantMessage
+      },
+      llmCallRecords: {
+        ...input.state.llmCallRecords,
+        [llmCallRecord.id]: llmCallRecord
+      },
+      eventLogs: failedEventResult.eventLogs,
+      timelineNodes: failedEventResult.timelineNodes,
+      timelineEdges: failedEventResult.timelineEdges
+    };
+
+    return {
+      state: nextState,
+      assistantMessage,
+      llmCallRecord,
+      events: [failedEventResult.event],
+      timelineNodes: [failedEventResult.timelineNode],
+      timelineEdges: failedEventResult.timelineEdge
+        ? [failedEventResult.timelineEdge]
+        : []
     };
   }
 }

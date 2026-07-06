@@ -107,6 +107,19 @@ function toRecord<T extends { id: string }>(items: T[]): Record<string, T> {
   return Object.fromEntries(items.map((item) => [item.id, item]));
 }
 
+export type LogicAssignment = {
+  id: string;
+  nodeId: string;
+  logicFocusKey: string;
+  logicFocusLabel: string;
+  targetNodeId?: string | null;
+  source: "user";
+  assignmentType: "user_new" | "user_previous";
+  reason: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type ProjectSnapshot = {
   mainWindowId: string;
   activeTreeWindowId: string | null;
@@ -167,6 +180,7 @@ type ProjectSnapshot = {
   documentChunks: Records<DocumentChunkModel>;
   contextBuildCaches: Records<ContextBuildCacheModel>;
   revisionSuggestions: Record<string, string>;
+  logicAssignments: Records<LogicAssignment>;
 };
 
 export type ReviewFocus = {
@@ -371,7 +385,8 @@ function emptyProjectSnapshot(): ProjectSnapshot {
     threadSummaries: {},
     documentChunks: {},
     contextBuildCaches: {},
-    revisionSuggestions: {}
+    revisionSuggestions: {},
+    logicAssignments: {}
   };
 }
 
@@ -435,7 +450,8 @@ function captureProjectSnapshot(state: AnswerAtlasState): ProjectSnapshot {
     threadSummaries: state.threadSummaries,
     documentChunks: state.documentChunks,
     contextBuildCaches: state.contextBuildCaches,
-    revisionSuggestions: state.revisionSuggestions
+    revisionSuggestions: state.revisionSuggestions,
+    logicAssignments: state.logicAssignments
   };
 }
 
@@ -456,6 +472,7 @@ function applyProjectSnapshot(
     mergeConflictMessage: null,
     activeRevisionBranchId: snapshot.activeRevisionBranchId ?? null,
     activeMergeRecordId: snapshot.activeMergeRecordId ?? null,
+    logicAssignments: snapshot.logicAssignments ?? {},
     activeReviewFocus: null
   };
 }
@@ -521,6 +538,7 @@ export type AnswerAtlasState = {
   threadSummaries: Records<ThreadSummaryModel>;
   documentChunks: Records<DocumentChunkModel>;
   contextBuildCaches: Records<ContextBuildCacheModel>;
+  logicAssignments: Records<LogicAssignment>;
   showContextDebugPanel: boolean;
   isDiffModalOpen: boolean;
   pendingPatch: PatchOperation[];
@@ -646,7 +664,357 @@ export type AnswerAtlasState = {
   returnToDocumentVersion: (versionId: string) => void;
   toggleContextDebugPanel: () => void;
   refreshContextPreview: () => void;
+  setLogicAssignment: (
+    nodeId: string,
+    assignment: {
+      logicFocusKey?: string;
+      logicFocusLabel: string;
+      targetNodeId?: string | null;
+      assignmentType: LogicAssignment["assignmentType"];
+      reason?: string;
+    }
+  ) => void;
+  clearLogicAssignment: (nodeId: string) => void;
 };
+
+function nodeIdCandidatesForMessageId(messageId?: string) {
+  if (!messageId) {
+    return [];
+  }
+
+  const groups = [
+    {
+      prefix: "rev-message-assistant-",
+      nodePrefixes: ["v-created-", "v-main-answer-"]
+    },
+    {
+      prefix: "conv-assistant-",
+      nodePrefixes: ["v-created-", "v-main-answer-"]
+    },
+    {
+      prefix: "rev-message-regenerated-",
+      nodePrefixes: ["v-main-answer-", "v-created-"]
+    },
+    {
+      prefix: "rev-local-message-assistant-",
+      nodePrefixes: ["v-local-answer-"]
+    },
+    {
+      prefix: "rev-nested-local-message-assistant-",
+      nodePrefixes: ["v-local-answer-"]
+    },
+    {
+      prefix: "msg-assistant-",
+      nodePrefixes: ["v-local-answer-"]
+    }
+  ];
+  const matchedGroup = groups.find((group) => messageId.startsWith(group.prefix));
+
+  if (!matchedGroup) {
+    return [];
+  }
+
+  const suffix = messageId.slice(matchedGroup.prefix.length);
+
+  return matchedGroup.nodePrefixes.map((prefix) => `${prefix}${suffix}`);
+}
+
+function isVersionNodeActive(state: AnswerAtlasState, nodeId?: string | null) {
+  if (!nodeId) {
+    return undefined;
+  }
+
+  const node = state.versionNodes[nodeId];
+
+  return node ? node.isActivePath : undefined;
+}
+
+function isSourceMessageActive(state: AnswerAtlasState, messageId?: string | null) {
+  const candidates = nodeIdCandidatesForMessageId(messageId ?? undefined);
+
+  for (const candidate of candidates) {
+    const active = isVersionNodeActive(state, candidate);
+
+    if (typeof active === "boolean") {
+      return active;
+    }
+  }
+
+  return undefined;
+}
+
+function isDocumentVersionActive(
+  state: AnswerAtlasState,
+  documentVersionId?: string | null
+) {
+  if (!documentVersionId) {
+    return undefined;
+  }
+
+  const version = state.documentVersions[documentVersionId];
+
+  if (!version) {
+    return undefined;
+  }
+
+  if (version.status === "deleted" || version.status === "inactive") {
+    return false;
+  }
+
+  return isVersionNodeActive(state, version.createdFromTimelineNodeId);
+}
+
+function isTextSelectionModelActive(state: AnswerAtlasState, selectionId?: string | null) {
+  if (!selectionId) {
+    return undefined;
+  }
+
+  const selection = state.textSelections[selectionId];
+
+  if (!selection) {
+    return undefined;
+  }
+
+  if (selection.status === "deleted" || selection.status === "discarded") {
+    return false;
+  }
+
+  return (
+    isSourceMessageActive(state, selection.sourceMessageId) ??
+    isDocumentVersionActive(state, selection.sourceDocumentVersionId) ??
+    true
+  );
+}
+
+function isAnchorActiveAfterTimelineChange(
+  state: AnswerAtlasState,
+  anchorId?: string | null,
+  visited = new Set<string>()
+): boolean | undefined {
+  if (!anchorId) {
+    return undefined;
+  }
+
+  const visitKey = `anchor:${anchorId}`;
+
+  if (visited.has(visitKey)) {
+    return undefined;
+  }
+
+  const nextVisited = new Set(visited);
+  nextVisited.add(visitKey);
+
+  const anchor = state.anchors[anchorId];
+
+  if (!anchor) {
+    return undefined;
+  }
+
+  const textSelectionActive = isTextSelectionModelActive(state, anchorId);
+
+  if (typeof textSelectionActive === "boolean") {
+    return textSelectionActive;
+  }
+
+  const messageActive = isSourceMessageActive(state, anchor.sourceMessageId);
+
+  if (typeof messageActive === "boolean") {
+    return messageActive;
+  }
+
+  if (anchor.sourceThreadId) {
+    return isThreadActiveAfterTimelineChange(
+      state,
+      anchor.sourceThreadId,
+      nextVisited
+    );
+  }
+
+  const block = anchor.blockId ? state.blocks[anchor.blockId] : undefined;
+
+  if (block) {
+    return isVersionNodeActive(state, block.createdInVersionNodeId) ?? true;
+  }
+
+  return true;
+}
+
+function isThreadActiveAfterTimelineChange(
+  state: AnswerAtlasState,
+  threadId?: string | null,
+  visited = new Set<string>()
+): boolean | undefined {
+  if (!threadId) {
+    return undefined;
+  }
+
+  const visitKey = `thread:${threadId}`;
+
+  if (visited.has(visitKey)) {
+    return undefined;
+  }
+
+  const nextVisited = new Set(visited);
+  nextVisited.add(visitKey);
+
+  const thread = state.threads[threadId];
+
+  if (!thread) {
+    return undefined;
+  }
+
+  if (thread.status === "deleted" || thread.status === "discarded") {
+    return false;
+  }
+
+  return (
+    isVersionNodeActive(state, thread.createdInVersionNodeId) ??
+    isAnchorActiveAfterTimelineChange(state, thread.anchorId, nextVisited) ??
+    true
+  );
+}
+
+function isComparisonActiveAfterTimelineChange(
+  state: AnswerAtlasState,
+  comparison?: ArgumentComparison
+) {
+  if (!comparison) {
+    return false;
+  }
+
+  if (comparison.status === "deleted" || comparison.status === "discarded") {
+    return false;
+  }
+
+  return (
+    isVersionNodeActive(state, comparison.createdInVersionNodeId) ??
+    isAnchorActiveAfterTimelineChange(state, comparison.anchorId) ??
+    true
+  );
+}
+
+function isBranchActiveAfterTimelineChange(
+  state: AnswerAtlasState,
+  branchId?: string | null
+) {
+  if (!branchId) {
+    return undefined;
+  }
+
+  const branch = state.branches[branchId];
+  const revisionBranch = state.revisionBranches[branchId];
+
+  if (branch?.status === "deleted" || branch?.status === "discarded") {
+    return false;
+  }
+
+  if (revisionBranch?.status === "deleted" || revisionBranch?.status === "discarded") {
+    return false;
+  }
+
+  return (
+    isVersionNodeActive(state, branch?.headVersionNodeId) ??
+    isVersionNodeActive(state, revisionBranch?.headTimelineNodeId) ??
+    isAnchorActiveAfterTimelineChange(state, branch?.anchorId) ??
+    isThreadActiveAfterTimelineChange(state, branch?.threadId) ??
+    true
+  );
+}
+
+function isMergeActiveAfterTimelineChange(
+  state: AnswerAtlasState,
+  mergeId?: string | null
+) {
+  if (!mergeId) {
+    return undefined;
+  }
+
+  const merge = state.mergeRecords[mergeId];
+
+  if (!merge) {
+    return undefined;
+  }
+
+  if (merge.status === "deleted" || merge.status === "discarded") {
+    return false;
+  }
+
+  return (
+    isTextSelectionModelActive(state, merge.sourceSelectionId) ??
+    isThreadActiveAfterTimelineChange(state, merge.sourceLocalThreadId) ??
+    isBranchActiveAfterTimelineChange(state, merge.sourceBranchId) ??
+    isSourceMessageActive(state, merge.sourceMessageId) ??
+    true
+  );
+}
+
+function reconcileWorkspaceFocusAfterTimelineChange(state: AnswerAtlasState) {
+  const selectedAnchorActive = isAnchorActiveAfterTimelineChange(
+    state,
+    state.selectedAnchorId
+  );
+  const selectedAnchorId =
+    selectedAnchorActive === false ? null : state.selectedAnchorId;
+  const selectedThreadActive = isThreadActiveAfterTimelineChange(
+    state,
+    state.selectedThreadId
+  );
+  const selectedThreadId =
+    selectedThreadActive === false ? null : state.selectedThreadId;
+  const activeComparison = state.activeTreeWindowId
+    ? Object.values(state.comparisons).find(
+        (comparison) => treeWindowId(comparison.id) === state.activeTreeWindowId
+      )
+    : undefined;
+  const comparisonActive = isComparisonActiveAfterTimelineChange(
+    state,
+    activeComparison
+  );
+  const activeTreeWindowId =
+    comparisonActive === false ? null : state.activeTreeWindowId;
+  const reviewFocusActive =
+    state.activeReviewFocus?.anchorId
+      ? isAnchorActiveAfterTimelineChange(state, state.activeReviewFocus.anchorId)
+      : state.activeReviewFocus?.documentId
+        ? state.activeReviewFocus.documentId === state.currentDocumentId
+        : true;
+  const activeRevisionBranchActive = isBranchActiveAfterTimelineChange(
+    state,
+    state.activeRevisionBranchId
+  );
+  const activeRevisionBranchId =
+    activeRevisionBranchActive === false ? null : state.activeRevisionBranchId;
+  const activeMergeRecordActive = isMergeActiveAfterTimelineChange(
+    state,
+    state.activeMergeRecordId
+  );
+  const activeMergeRecordId =
+    activeMergeRecordActive === false ? null : state.activeMergeRecordId;
+  const shouldCloseMerge = activeMergeRecordActive === false;
+  const shouldCloseSideThread =
+    selectedThreadActive === false || selectedAnchorActive === false;
+  const shouldCloseComparison = comparisonActive === false;
+
+  return {
+    ...state,
+    selectedAnchorId,
+    selectedThreadId,
+    activeReviewFocus: reviewFocusActive === false ? null : state.activeReviewFocus,
+    activeRevisionBranchId,
+    activeMergeRecordId,
+    pendingMergeDiff: shouldCloseMerge ? null : state.pendingMergeDiff,
+    mergeConflictMessage: shouldCloseMerge ? null : state.mergeConflictMessage,
+    isDiffModalOpen: shouldCloseMerge ? false : state.isDiffModalOpen,
+    pendingPatch: shouldCloseMerge ? [] : state.pendingPatch,
+    isSideThreadOpen: shouldCloseSideThread ? false : state.isSideThreadOpen,
+    isSideThreadMinimized: shouldCloseSideThread
+      ? false
+      : state.isSideThreadMinimized,
+    activeTreeWindowId: shouldCloseComparison ? null : activeTreeWindowId,
+    isComparisonExpanded: shouldCloseComparison ? false : state.isComparisonExpanded,
+    isGeneratingComparison: shouldCloseComparison ? false : state.isGeneratingComparison
+  };
+}
 
 function makeIdSuffix() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1232,6 +1600,27 @@ function generatedOutputToText(output: {
     .join("\n\n");
 }
 
+function llmErrorToUserMessage(error: unknown) {
+  const rawMessage =
+    error instanceof Error && error.message.trim()
+      ? error.message
+      : "Unknown generation error.";
+
+  if (/model|not available|does not exist|unsupported|404/i.test(rawMessage)) {
+    return "生成失败：当前选择的模型不可用或不在这个 API key 的可用范围内。请切换模型后重试。";
+  }
+
+  if (/401|403|api key|unauthorized|permission/i.test(rawMessage)) {
+    return "生成失败：API key 或模型权限验证失败。请检查 key、额度和模型权限后重试。";
+  }
+
+  if (/network|fetch|timeout|ECONN|ENOTFOUND/i.test(rawMessage)) {
+    return "生成失败：模型请求没有连通。请检查网络或稍后重试。";
+  }
+
+  return "生成失败：LLM 请求没有完成。请换一个模型或稍后重试。";
+}
+
 function appendConversationMessages({
   state,
   sessionId,
@@ -1433,6 +1822,7 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
   threadSummaries: {},
   documentChunks: {},
   contextBuildCaches: {},
+  logicAssignments: {},
   showContextDebugPanel: false,
   isDiffModalOpen: false,
   pendingPatch: [],
@@ -1455,6 +1845,58 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
   activeReviewFocus: null,
   activeUtilityPanel: null,
   revisionSuggestions: {},
+
+  setLogicAssignment: (nodeId, assignment) => {
+    set((state) => {
+      const existing = state.logicAssignments[nodeId];
+      const now = new Date().toISOString();
+      const logicFocusKey =
+        assignment.logicFocusKey ??
+        existing?.logicFocusKey ??
+        `user-logic-${nodeId}-${makeIdSuffix()}`;
+      const nextAssignment: LogicAssignment = {
+        id: existing?.id ?? `logic-assignment-${nodeId}`,
+        nodeId,
+        logicFocusKey,
+        logicFocusLabel: assignment.logicFocusLabel,
+        targetNodeId: assignment.targetNodeId ?? null,
+        source: "user",
+        assignmentType: assignment.assignmentType,
+        reason:
+          assignment.reason ??
+          (assignment.assignmentType === "user_new"
+            ? "User marked this step as a separate logic branch."
+            : "User moved this step back to an earlier logic branch."),
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now
+      };
+
+      return {
+        ...state,
+        logicAssignments: {
+          ...state.logicAssignments,
+          [nodeId]: nextAssignment
+        }
+      };
+    });
+  },
+
+  clearLogicAssignment: (nodeId) => {
+    set((state) => {
+      if (!state.logicAssignments[nodeId]) {
+        return state;
+      }
+
+      const logicAssignments = { ...state.logicAssignments };
+
+      delete logicAssignments[nodeId];
+
+      return {
+        ...state,
+        logicAssignments
+      };
+    });
+  },
 
   createProject: () => {
     set((state) => {
@@ -1907,6 +2349,17 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
 
     set({ isGeneratingDocument: true });
 
+    let pendingMainFailure: {
+      suffix: string;
+      projectId: string;
+      conversationId: string;
+      model: string;
+      userConversationMessage: ConversationMessage;
+      startedRevision: ReturnType<
+        typeof MainConversationRevisionService.createStartedMainSend
+      >;
+    } | null = null;
+
     try {
       const state = get();
       const mainWindow = state.windows[state.mainWindowId];
@@ -1965,6 +2418,15 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
         createdAt: now
       };
 
+      pendingMainFailure = {
+        suffix,
+        projectId: state.currentProjectId,
+        conversationId: mainSession?.id ?? DEFAULT_MAIN_SESSION_ID,
+        model,
+        userConversationMessage,
+        startedRevision
+      };
+
       set((current) => ({
         ...current,
         conversationMessages: {
@@ -2008,7 +2470,9 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
       });
 
       if (!response.ok) {
-        throw new Error("Failed to generate document");
+        const details = await response.text();
+
+        throw new Error(`Failed to generate document: ${response.status} ${details}`);
       }
 
       const data = (await response.json()) as {
@@ -2163,8 +2627,73 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
         contextSnapshots: completedRevisionState.contextSnapshots,
         llmCallRecords: completedRevisionState.llmCallRecords
       });
-    } catch {
-      set({ isGeneratingDocument: false });
+      pendingMainFailure = null;
+    } catch (error) {
+      const failure = pendingMainFailure;
+
+      if (!failure) {
+        set({ isGeneratingDocument: false });
+        get().refreshContextPreview();
+        return;
+      }
+
+      const failedAt = new Date().toISOString();
+      const userFacingMessage = llmErrorToUserMessage(error);
+      const assistantConversationMessage: ConversationMessage = {
+        id: `conv-assistant-failed-${failure.suffix}`,
+        sessionId: failure.conversationId,
+        role: "assistant",
+        content: userFacingMessage,
+        modelConfigId: failure.model,
+        modelName: failure.model,
+        contentState: "normal",
+        includeInContext: false,
+        createdAt: failedAt
+      };
+      const failedRevision = MainConversationRevisionService.failMainSend({
+        state: failure.startedRevision.state,
+        projectId: failure.projectId,
+        conversationId: failure.conversationId,
+        prompt,
+        errorMessage: userFacingMessage,
+        model: failure.model,
+        llmCallId: failure.startedRevision.llmCallRecord.id,
+        contextSnapshotId: failure.startedRevision.contextSnapshot.id,
+        userTimelineNodeId: failure.startedRevision.timelineNodes[0].id,
+        now: failedAt,
+        suffix: failure.suffix
+      });
+
+      set((current) => ({
+        ...current,
+        conversationMessages: {
+          ...current.conversationMessages,
+          [failure.userConversationMessage.id]: failure.userConversationMessage,
+          [assistantConversationMessage.id]: assistantConversationMessage
+        },
+        mainConversations: failedRevision.state.mainConversations,
+        revisionMessages: failedRevision.state.revisionMessages,
+        documentVersions: failedRevision.state.documentVersions,
+        manualEditDrafts: failedRevision.state.manualEditDrafts,
+        eventLogs: failedRevision.state.eventLogs,
+        timelineNodes: failedRevision.state.timelineNodes,
+        timelineEdges: failedRevision.state.timelineEdges,
+        contextSnapshots: failedRevision.state.contextSnapshots,
+        llmCallRecords: failedRevision.state.llmCallRecords,
+        isGeneratingDocument: false
+      }));
+      syncRevisionFoundation({
+        projects: failedRevision.state.projects,
+        mainConversations: failedRevision.state.mainConversations,
+        revisionMessages: failedRevision.state.revisionMessages,
+        documentVersions: failedRevision.state.documentVersions,
+        manualEditDrafts: failedRevision.state.manualEditDrafts,
+        eventLogs: failedRevision.state.eventLogs,
+        timelineNodes: failedRevision.state.timelineNodes,
+        timelineEdges: failedRevision.state.timelineEdges,
+        contextSnapshots: failedRevision.state.contextSnapshots,
+        llmCallRecords: failedRevision.state.llmCallRecords
+      });
     }
 
     get().refreshContextPreview();
@@ -5033,19 +5562,21 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
       }
 
       if (activeDocumentVersion) {
-        return syncVisibleDocumentVersion(
-          {
-            ...state,
-            currentDocumentId: documentId
-          },
-          activeDocumentVersion,
-          nodeId
+        return reconcileWorkspaceFocusAfterTimelineChange(
+          syncVisibleDocumentVersion(
+            {
+              ...state,
+              currentDocumentId: documentId
+            },
+            activeDocumentVersion,
+            nodeId
+          )
         );
       }
 
       const result = checkoutVersionNode(document, state.versionNodes, nodeId);
 
-      return {
+      return reconcileWorkspaceFocusAfterTimelineChange({
         ...state,
         activeVersionNodeId: nodeId,
         documents: {
@@ -5053,7 +5584,7 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
           [documentId]: result.document
         },
         versionNodes: result.versionNodes
-      };
+      });
     });
 
     get().refreshContextPreview();
@@ -5204,6 +5735,7 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
         threadSummaries: state.threadSummaries,
         documentChunks: state.documentChunks,
         contextBuildCaches: state.contextBuildCaches,
+        logicAssignments: state.logicAssignments,
         selectedModel: state.selectedModel,
         llmProvider: state.llmProvider,
         modelSource: state.modelSource,

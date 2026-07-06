@@ -30,8 +30,12 @@ type MainDocumentPanelProps = {
   documentId: string;
 };
 
+type ChatVisibility = "active" | "inactive" | "removed" | "all";
+type ChatPathStatus = "active" | "inactive" | "discarded" | "deleted";
+
 export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
   const [prompt, setPrompt] = useState("");
+  const [chatVisibility, setChatVisibility] = useState<ChatVisibility>("active");
   const [editDraftId, setEditDraftId] = useState<string | null>(null);
   const [draftContent, setDraftContent] = useState("");
   const [diffForReview, setDiffForReview] = useState<TextDiff | null>(null);
@@ -98,9 +102,7 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
     () =>
       Object.values(conversationMessages)
         .filter(
-          (message) =>
-            message.sessionId === mainSession?.id &&
-            message.contentState !== "deleted"
+          (message) => message.sessionId === mainSession?.id
         )
         .sort(
           (a, b) =>
@@ -108,13 +110,107 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
         ),
     [conversationMessages, mainSession?.id]
   );
+  function versionNodeForConversationMessage(messageId: string) {
+    const suffix = messageId.startsWith("conv-assistant-")
+      ? messageId.slice("conv-assistant-".length)
+      : messageId.startsWith("conv-user-")
+        ? messageId.slice("conv-user-".length)
+        : "";
+
+    if (!suffix) {
+      return undefined;
+    }
+
+    return (
+      versionNodes[`v-created-${suffix}`] ??
+      versionNodes[`v-main-answer-${suffix}`]
+    );
+  }
+
+  function chatPathStatusForMessage(
+    message: (typeof mainMessages)[number]
+  ): ChatPathStatus {
+    if (message.contentState === "deleted") {
+      return "deleted";
+    }
+
+    const node = versionNodeForConversationMessage(message.id);
+
+    if (!node) {
+      return "active";
+    }
+
+    if (node.nodeType === "deleted") {
+      return "deleted";
+    }
+
+    if (node.nodeType === "discarded") {
+      return "discarded";
+    }
+
+    return node.isActivePath ? "active" : "inactive";
+  }
+
+  const messageStatusById = useMemo(
+    () =>
+      Object.fromEntries(
+        mainMessages.map((message) => [
+          message.id,
+          chatPathStatusForMessage(message)
+        ])
+      ) as Record<string, ChatPathStatus>,
+    [mainMessages, versionNodes]
+  );
+  const displayedMainMessages = useMemo(
+    () =>
+      mainMessages.filter((message) => {
+        const status = messageStatusById[message.id] ?? "active";
+
+        if (chatVisibility === "all") {
+          return true;
+        }
+
+        if (chatVisibility === "removed") {
+          return status === "deleted" || status === "discarded";
+        }
+
+        return status === chatVisibility;
+      }),
+    [chatVisibility, mainMessages, messageStatusById]
+  );
+  const chatStatusCounts = useMemo(
+    () =>
+      mainMessages.reduce(
+        (counts, message) => {
+          const status = messageStatusById[message.id] ?? "active";
+
+          counts.all += 1;
+
+          if (status === "deleted" || status === "discarded") {
+            counts.removed += 1;
+          } else {
+            counts[status] += 1;
+          }
+
+          return counts;
+        },
+        {
+          active: 0,
+          inactive: 0,
+          removed: 0,
+          all: 0
+        } as Record<ChatVisibility, number>
+      ),
+    [mainMessages, messageStatusById]
+  );
   const userQuestions = useMemo(
     () =>
       mainMessages.filter(
         (message) =>
-          message.role === "user" && message.contentState !== "deleted"
+          message.role === "user" &&
+          (messageStatusById[message.id] ?? "active") === "active"
       ),
-    [mainMessages]
+    [mainMessages, messageStatusById]
   );
   const latestAssistantMessage = useMemo(
     () =>
@@ -122,9 +218,10 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
         .reverse()
         .find(
           (message) =>
-            message.role === "assistant" && message.contentState !== "deleted"
+            message.role === "assistant" &&
+            (messageStatusById[message.id] ?? "active") === "active"
         ),
-    [mainMessages]
+    [mainMessages, messageStatusById]
   );
   const versionHistory = useMemo(
     () =>
@@ -160,7 +257,7 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
       top: chatAreaRef.current.scrollHeight,
       behavior: "smooth"
     });
-  }, [mainMessages.length, isGeneratingDocument]);
+  }, [displayedMainMessages.length, isGeneratingDocument]);
 
   const blocks = useMemo(() => {
     if (!document || !activeVersionNodeId) {
@@ -383,11 +480,46 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
                   </pre>
                 </div>
               )}
-              {mainMessages.map((message) => {
+              <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 rounded-lg border border-line bg-white/95 p-2 text-xs shadow-sm backdrop-blur">
+                {([
+                  ["active", "Active"],
+                  ["inactive", "Inactive"],
+                  ["removed", "Removed"],
+                  ["all", "All"]
+                ] as Array<[ChatVisibility, string]>).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setChatVisibility(value)}
+                    className={`rounded-md px-2.5 py-1 font-semibold ${
+                      chatVisibility === value
+                        ? "bg-atlasBlue text-white"
+                        : "border border-line bg-white text-slate-600 hover:bg-slate-50"
+                    }`}
+                  >
+                    {label}
+                    <span className="ml-1 opacity-80">
+                      {chatStatusCounts[value]}
+                    </span>
+                  </button>
+                ))}
+                <span className="ml-auto text-[11px] font-semibold text-muted">
+                  Active messages are the only default main-chat memory path.
+                </span>
+              </div>
+              {displayedMainMessages.length === 0 && (
+                <div className="rounded-lg border border-dashed border-line bg-slate-50 p-5 text-center text-sm text-muted">
+                  No messages in this view.
+                </div>
+              )}
+              {displayedMainMessages.map((message) => {
                 const isUser = message.role === "user";
                 const Icon = isUser ? UserRound : Bot;
+                const pathStatus = messageStatusById[message.id] ?? "active";
                 const isLatestAssistant =
-                  !isUser && message.id === latestAssistantMessage?.id;
+                  pathStatus === "active" &&
+                  !isUser &&
+                  message.id === latestAssistantMessage?.id;
                 const canSelectAssistantAnswer =
                   !isUser &&
                   document &&
@@ -401,13 +533,21 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
                   <article
                     id={`main-message-${message.id}`}
                     key={message.id}
-                    className={`flex ${isUser ? "justify-end" : "justify-start"}`}
+                    className={`flex ${isUser ? "justify-end" : "justify-start"} ${
+                      pathStatus === "inactive" ? "opacity-70" : ""
+                    }`}
                   >
                     <div
                       className={`max-w-[86%] rounded-lg border px-4 py-3 text-sm leading-6 shadow-sm ${
-                        isUser
-                          ? "border-blue-200 bg-blue-50 text-slate-800"
-                          : "border-line bg-white text-slate-800"
+                        pathStatus === "deleted"
+                          ? "border-red-200 bg-red-50 text-red-800"
+                          : pathStatus === "discarded"
+                            ? "border-amber-200 bg-amber-50 text-amber-900"
+                            : pathStatus === "inactive"
+                              ? "border-slate-200 bg-slate-50 text-slate-600"
+                              : isUser
+                                ? "border-blue-200 bg-blue-50 text-slate-800"
+                                : "border-line bg-white text-slate-800"
                       }`}
                     >
                       <div className="mb-2 flex items-center justify-between gap-3 font-semibold text-ink">
@@ -419,6 +559,19 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
                           {isUser ? "You" : "Assistant"}
                         </span>
                         <span className="flex items-center gap-1">
+                          {pathStatus !== "active" && (
+                            <span
+                              className={`rounded px-2 py-0.5 text-xs font-bold uppercase tracking-wide ${
+                                pathStatus === "deleted"
+                                  ? "bg-red-100 text-red-700"
+                                  : pathStatus === "discarded"
+                                    ? "bg-amber-100 text-amber-700"
+                                    : "bg-slate-200 text-slate-600"
+                              }`}
+                            >
+                              {pathStatus}
+                            </span>
+                          )}
                           {!isUser && isLatestAssistant && (
                             <>
                               <button
@@ -466,7 +619,11 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
                           )}
                         </span>
                       </div>
-                      {isLatestAssistant && editDraftId ? (
+                      {pathStatus === "deleted" ? (
+                        <div className="rounded-md border border-red-200 bg-white/70 px-3 py-2 text-sm font-semibold text-red-700">
+                          [deleted message]
+                        </div>
+                      ) : isLatestAssistant && editDraftId ? (
                         <div className="space-y-3">
                           <textarea
                             value={draftContent}

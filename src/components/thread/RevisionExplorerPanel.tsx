@@ -1071,7 +1071,7 @@ function DetailPanel({
             title={
               canRevert
                 ? "Return active path to this version"
-                : "This version is already active or has no revert timeline node"
+                : "This version is already active or has no return logic point"
             }
           >
             <RotateCcw size={14} />
@@ -1081,7 +1081,7 @@ function DetailPanel({
         {view.projectId !== currentProjectId && (
           <p className="text-xs leading-5 text-muted">
             Reverting will first switch to this project, then use the version's
-            timeline node.
+            return logic point.
           </p>
         )}
       </div>
