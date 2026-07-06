@@ -431,6 +431,96 @@ describe("revision foundation services", () => {
     );
   });
 
+  it("attaches a historical answer selection to its source message node instead of the current active node", () => {
+    const baseState = createEmptyRevisionState();
+    const historicalAnswerNode = {
+      id: "timeline-assistant-old",
+      projectId: "project-1",
+      conversationId: "conversation-1",
+      parentNodeId: null,
+      eventId: "event-assistant-old",
+      eventType: "message.assistant.created",
+      targetObjectType: "message",
+      targetObjectId: "rev-message-assistant-old",
+      label: "Old assistant answer",
+      actor: "assistant",
+      memoryScope: "conversation",
+      memoryEffect: "included",
+      status: "inactive",
+      timestamp: "2026-07-04T00:00:00.000Z"
+    } as const;
+    const currentAnswerNode = {
+      id: "timeline-assistant-current",
+      projectId: "project-1",
+      conversationId: "conversation-1",
+      parentNodeId: null,
+      eventId: "event-assistant-current",
+      eventType: "message.assistant.created",
+      targetObjectType: "message",
+      targetObjectId: "rev-message-assistant-current",
+      label: "Current assistant answer",
+      actor: "assistant",
+      memoryScope: "conversation",
+      memoryEffect: "included",
+      status: "active",
+      timestamp: "2026-07-04T00:02:00.000Z"
+    } as const;
+    const selectionResult = TextSelectionService.createOrGetSelection({
+      state: {
+        ...baseState,
+        mainConversations: {
+          "conversation-1": {
+            id: "conversation-1",
+            projectId: "project-1",
+            title: "Main Conversation",
+            status: "active",
+            activeTimelineNodeId: currentAnswerNode.id,
+            createdAt: "2026-07-04T00:00:00.000Z",
+            updatedAt: "2026-07-04T00:02:00.000Z"
+          }
+        },
+        timelineNodes: {
+          [historicalAnswerNode.id]: historicalAnswerNode,
+          [currentAnswerNode.id]: currentAnswerNode
+        }
+      },
+      projectId: "project-1",
+      conversationId: "conversation-1",
+      sourceType: "message",
+      sourceId: "rev-message-assistant-old",
+      sourceMessageId: "rev-message-assistant-old",
+      sourceDocumentVersionId: "doc-version-old",
+      sourceDocumentVersionNumber: 1,
+      sourcePathStatus: "inactive",
+      sourceVersionNodeId: "v-main-answer-old",
+      activeTimelineNodeId: currentAnswerNode.id,
+      selectedText: "old answer fragment",
+      startOffset: 5,
+      endOffset: 24,
+      textHash: "hash-old-answer-fragment",
+      beforeContext: "from ",
+      afterContext: " text",
+      now: "2026-07-04T00:03:00.000Z",
+      suffix: "historical-selection"
+    });
+    const selectionNode = Object.values(selectionResult.state.timelineNodes).find(
+      (node) =>
+        node.targetObjectType === "text_selection" &&
+        node.targetObjectId === selectionResult.selection.id
+    );
+    const selectionEdge = Object.values(selectionResult.state.timelineEdges).find(
+      (edge) => edge.targetNodeId === selectionNode?.id
+    );
+
+    expect(selectionNode?.parentNodeId).toBe(historicalAnswerNode.id);
+    expect(selectionEdge?.sourceNodeId).toBe(historicalAnswerNode.id);
+    expect(selectionResult.selection.payload).toMatchObject({
+      source_path_status: "inactive",
+      source_version_node_id: "v-main-answer-old",
+      source_document_version_number: 1
+    });
+  });
+
   it("creates and restores a local thread for a selection with a branch edge", () => {
     const selectionResult = TextSelectionService.createOrGetSelection({
       state: createEmptyRevisionState(),

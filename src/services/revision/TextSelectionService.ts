@@ -12,6 +12,9 @@ type CreateOrGetSelectionInput = {
   sourceType: TextSelectionModel["sourceType"];
   sourceId: string;
   sourceDocumentVersionId?: string;
+  sourceDocumentVersionNumber?: number;
+  sourcePathStatus?: "active" | "inactive" | "discarded" | "deleted";
+  sourceVersionNodeId?: string;
   sourceMessageId?: string;
   selectedText: string;
   startOffset?: number;
@@ -40,12 +43,44 @@ function findSourceNode(
         node.projectId === input.projectId &&
         node.targetObjectType === input.sourceType &&
         node.targetObjectId === input.sourceId &&
-        node.status === "active"
+        node.status !== "deleted"
     )
   );
 
   if (exactSourceNode) {
     return exactSourceNode;
+  }
+
+  if (input.sourceMessageId) {
+    const sourceMessageNode = latestNode(
+      Object.values(state.timelineNodes).filter(
+        (node) =>
+          node.projectId === input.projectId &&
+          node.targetObjectType === "message" &&
+          node.targetObjectId === input.sourceMessageId &&
+          node.status !== "deleted"
+      )
+    );
+
+    if (sourceMessageNode) {
+      return sourceMessageNode;
+    }
+  }
+
+  if (input.sourceDocumentVersionId) {
+    const sourceDocumentVersionNode = latestNode(
+      Object.values(state.timelineNodes).filter(
+        (node) =>
+          node.projectId === input.projectId &&
+          node.targetObjectType === "document_version" &&
+          node.targetObjectId === input.sourceDocumentVersionId &&
+          node.status !== "deleted"
+      )
+    );
+
+    if (sourceDocumentVersionNode) {
+      return sourceDocumentVersionNode;
+    }
   }
 
   if (input.activeTimelineNodeId) {
@@ -121,7 +156,10 @@ export class TextSelectionService {
       payload: {
         source_object_type: input.sourceType,
         source_object_id: input.sourceId,
-        source_document_version_id: input.sourceDocumentVersionId
+        source_document_version_id: input.sourceDocumentVersionId,
+        source_document_version_number: input.sourceDocumentVersionNumber,
+        source_path_status: input.sourcePathStatus,
+        source_version_node_id: input.sourceVersionNodeId
       }
     };
     const sourceNode = findSourceNode(input.state, input);
@@ -140,6 +178,9 @@ export class TextSelectionService {
           sourceObjectType: input.sourceType,
           sourceObjectId: input.sourceId,
           sourceDocumentVersionId: input.sourceDocumentVersionId,
+          sourceDocumentVersionNumber: input.sourceDocumentVersionNumber,
+          sourcePathStatus: input.sourcePathStatus,
+          sourceVersionNodeId: input.sourceVersionNodeId,
           textHash: input.textHash
         }
       },
@@ -155,6 +196,9 @@ export class TextSelectionService {
           source_object_type: input.sourceType,
           source_object_id: input.sourceId,
           source_document_version_id: input.sourceDocumentVersionId,
+          source_document_version_number: input.sourceDocumentVersionNumber,
+          source_path_status: input.sourcePathStatus,
+          source_version_node_id: input.sourceVersionNodeId,
           start_offset: input.startOffset,
           end_offset: input.endOffset,
           text_hash: input.textHash

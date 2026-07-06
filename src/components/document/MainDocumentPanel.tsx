@@ -17,11 +17,13 @@ import {
   ArrowLeft,
   ArrowRight,
   Bot,
+  EyeOff,
   GitCompareArrows,
   History,
   PencilLine,
   RotateCcw,
   Send,
+  SlidersHorizontal,
   Sparkles,
   UserRound
 } from "lucide-react";
@@ -36,6 +38,7 @@ type ChatPathStatus = "active" | "inactive" | "discarded" | "deleted";
 export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
   const [prompt, setPrompt] = useState("");
   const [chatVisibility, setChatVisibility] = useState<ChatVisibility>("active");
+  const [isChatStatusBarVisible, setIsChatStatusBarVisible] = useState(true);
   const [editDraftId, setEditDraftId] = useState<string | null>(null);
   const [draftContent, setDraftContent] = useState("");
   const [diffForReview, setDiffForReview] = useState<TextDiff | null>(null);
@@ -124,6 +127,17 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
     return (
       versionNodes[`v-created-${suffix}`] ??
       versionNodes[`v-main-answer-${suffix}`]
+    );
+  }
+
+  function documentVersionForConversationMessage(messageId: string) {
+    const revisionMessageId = revisionMessageIdForConversation(messageId);
+    const node = versionNodeForConversationMessage(messageId);
+
+    return Object.values(documentVersions).find(
+      (version) =>
+        (node?.id && version.createdFromTimelineNodeId === node.id) ||
+        version.sourceId === revisionMessageId
     );
   }
 
@@ -480,32 +494,67 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
                   </pre>
                 </div>
               )}
-              <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 rounded-lg border border-line bg-white/95 p-2 text-xs shadow-sm backdrop-blur">
-                {([
-                  ["active", "Active"],
-                  ["inactive", "Inactive"],
-                  ["removed", "Removed"],
-                  ["all", "All"]
-                ] as Array<[ChatVisibility, string]>).map(([value, label]) => (
+              <div className="sticky top-0 z-10 flex justify-end">
+                {isChatStatusBarVisible ? (
+                  <div className="flex w-full flex-wrap items-center gap-2 rounded-lg border border-line bg-white/95 p-2 text-xs shadow-sm backdrop-blur">
+                    {([
+                      ["active", "Active"],
+                      ["inactive", "Inactive"],
+                      ["removed", "Removed"],
+                      ["all", "All"]
+                    ] as Array<[ChatVisibility, string]>).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setChatVisibility(value)}
+                        className={`rounded-md px-2.5 py-1 font-semibold ${
+                          chatVisibility === value
+                            ? "bg-atlasBlue text-white"
+                            : "border border-line bg-white text-slate-600 hover:bg-slate-50"
+                        }`}
+                      >
+                        {label}
+                        <span className="ml-1 opacity-80">
+                          {chatStatusCounts[value]}
+                        </span>
+                      </button>
+                    ))}
+                    <span className="ml-auto text-[11px] font-semibold text-muted">
+                      Active messages are the only default main-chat memory path.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setIsChatStatusBarVisible(false)}
+                      className="grid h-7 w-7 place-items-center rounded-md border border-line bg-white text-slate-600 hover:bg-slate-50"
+                      title="Hide message filters"
+                      aria-label="Hide message filters"
+                    >
+                      <EyeOff size={14} />
+                    </button>
+                  </div>
+                ) : (
                   <button
-                    key={value}
                     type="button"
-                    onClick={() => setChatVisibility(value)}
-                    className={`rounded-md px-2.5 py-1 font-semibold ${
-                      chatVisibility === value
-                        ? "bg-atlasBlue text-white"
-                        : "border border-line bg-white text-slate-600 hover:bg-slate-50"
-                    }`}
+                    onClick={() => setIsChatStatusBarVisible(true)}
+                    className="flex h-8 items-center gap-2 rounded-md border border-line bg-white/95 px-2.5 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur hover:bg-slate-50"
+                    title="Show message filters"
+                    aria-label="Show message filters"
                   >
-                    {label}
-                    <span className="ml-1 opacity-80">
-                      {chatStatusCounts[value]}
+                    <SlidersHorizontal size={14} />
+                    <span className="max-[900px]:hidden">
+                      {chatVisibility === "active"
+                        ? "Active"
+                        : chatVisibility === "inactive"
+                          ? "Inactive"
+                          : chatVisibility === "removed"
+                            ? "Removed"
+                            : "All"}
+                      <span className="ml-1 text-muted">
+                        {chatStatusCounts[chatVisibility]}
+                      </span>
                     </span>
                   </button>
-                ))}
-                <span className="ml-auto text-[11px] font-semibold text-muted">
-                  Active messages are the only default main-chat memory path.
-                </span>
+                )}
               </div>
               {displayedMainMessages.length === 0 && (
                 <div className="rounded-lg border border-dashed border-line bg-slate-50 p-5 text-center text-sm text-muted">
@@ -516,6 +565,16 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
                 const isUser = message.role === "user";
                 const Icon = isUser ? UserRound : Bot;
                 const pathStatus = messageStatusById[message.id] ?? "active";
+                const messageVersionNode = versionNodeForConversationMessage(
+                  message.id
+                );
+                const messageDocumentVersion =
+                  !isUser && pathStatus !== "deleted"
+                    ? documentVersionForConversationMessage(message.id)
+                    : undefined;
+                const revisionMessageId = revisionMessageIdForConversation(
+                  message.id
+                );
                 const isLatestAssistant =
                   pathStatus === "active" &&
                   !isUser &&
@@ -523,7 +582,7 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
                 const canSelectAssistantAnswer =
                   !isUser &&
                   document &&
-                  isLatestAssistant;
+                  pathStatus !== "deleted";
                 const renderedAssistantText =
                   isLatestAssistant && activeDocumentVersion
                     ? activeDocumentVersion.content
@@ -655,27 +714,47 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
                           </div>
                         </div>
                       ) : canSelectAssistantAnswer ? (
-                        <DocumentAnswerRenderer
-                          answerId={document.id}
-                          text={renderedAssistantText}
-                          source={{
-                            conversationId: mainSession?.id,
-                            sourceType: "message",
-                            sourceId: revisionMessageIdForConversation(message.id),
-                            sourceMessageId: revisionMessageIdForConversation(message.id),
-                            sourceDocumentVersionId: activeDocumentVersion?.id
-                          }}
-                          onAskAboutThis={(selection) =>
-                            openSelectionBranch(selection, "ask")
-                          }
-                          onReviseThis={(selection) =>
-                            openSelectionBranch(selection, "revise")
-                          }
-                          onCreateBranch={(selection) =>
-                            openSelectionBranch(selection, "ask")
-                          }
-                          onAddNote={handleAddNote}
-                        />
+                        <div className="space-y-2">
+                          {!isLatestAssistant && (
+                            <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-semibold text-slate-600">
+                              {pathStatus === "active"
+                                ? "Earlier answer. Local questions stay attached to this answer."
+                                : "Historical answer. Local questions stay attached to this non-active path."}
+                            </div>
+                          )}
+                          <DocumentAnswerRenderer
+                            answerId={`${document.id}-${message.id}`}
+                            text={renderedAssistantText}
+                            source={{
+                              conversationId: mainSession?.id,
+                              sourceType: "message",
+                              sourceId: revisionMessageId,
+                              sourceMessageId: revisionMessageId,
+                              sourceDocumentVersionId:
+                                messageDocumentVersion?.id ??
+                                (isLatestAssistant
+                                  ? activeDocumentVersion?.id
+                                  : undefined),
+                              sourcePathStatus: pathStatus,
+                              sourceVersionNodeId: messageVersionNode?.id,
+                              sourceDocumentVersionNumber:
+                                messageDocumentVersion?.versionNumber ??
+                                (isLatestAssistant
+                                  ? activeDocumentVersion?.versionNumber
+                                  : undefined)
+                            }}
+                            onAskAboutThis={(selection) =>
+                              openSelectionBranch(selection, "ask")
+                            }
+                            onReviseThis={(selection) =>
+                              openSelectionBranch(selection, "revise")
+                            }
+                            onCreateBranch={(selection) =>
+                              openSelectionBranch(selection, "ask")
+                            }
+                            onAddNote={handleAddNote}
+                          />
+                        </div>
                       ) : (
                         <MarkdownText text={renderedAssistantText} />
                       )}

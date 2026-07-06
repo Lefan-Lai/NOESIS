@@ -9792,3 +9792,227 @@ deleted_data = none
 ```
 
 This change only affects Revision Logic Map routing and layout. It does not delete messages, change document versions, alter EventLog records, or change which memories enter future LLM context.
+
+## 2026-07-06 - Historical assistant answer selection
+
+### User-facing issue
+
+After a long main conversation, earlier assistant answers were visible but could no longer be selected with the mouse for local follow-up questions. The UI only enabled text selection for the latest assistant answer.
+
+### Change
+
+Main chat rendering now treats every non-deleted assistant message as a selectable source:
+
+```text
+active assistant answer -> selectable
+inactive historical assistant answer -> selectable as historical context
+discarded visible assistant answer -> selectable but still carries discarded source status
+deleted assistant answer -> not selectable, still rendered as deleted placeholder
+```
+
+The latest answer still keeps the edit / version / diff controls. Earlier answers get a small historical-source notice and then render through the same selection toolbar used by the latest answer.
+
+### Source binding
+
+Selections now bind to the actual assistant message they came from instead of implicitly binding to the latest active answer:
+
+```text
+sourceType = message
+sourceId = rev-message-assistant-...
+sourceMessageId = rev-message-assistant-...
+sourceDocumentVersionId = matching document version when available
+sourceVersionNodeId = matching visual version node when available
+sourcePathStatus = active | inactive | discarded | deleted
+```
+
+For message-based selections, the store no longer fills in the current active document version as a fallback. That prevents old-answer selections from silently inheriting the newest document version.
+
+### Timeline attachment
+
+`TextSelectionService` now resolves the selection source in this order:
+
+```text
+1. exact sourceType + sourceId timeline node
+2. sourceMessageId timeline node
+3. sourceDocumentVersionId timeline node
+4. activeTimelineNodeId fallback
+5. latest active project node fallback
+```
+
+Source node lookup allows inactive, non-deleted nodes. This is necessary because historical visible answers may belong to inactive paths after revert or path changes, but selecting them should still attach the local branch to the old answer, not to the current active answer.
+
+### Regression test
+
+Added a service-layer test that creates:
+
+```text
+old inactive assistant answer node
+current active assistant answer node
+selection from old assistant answer
+```
+
+The test verifies:
+
+```text
+selection timeline parent = old assistant node
+selection edge source = old assistant node
+payload.source_path_status = inactive
+payload.source_version_node_id is preserved
+payload.source_document_version_number is preserved
+```
+
+### Memory and LLM context effect
+
+```text
+memory_scope = selected_text
+memory_effect = none until local thread/question/merge/note action
+deleted_data = none
+```
+
+This change does not delete messages or change existing document versions. It only makes historical visible assistant answers selectable and records their true source so later local windows, context reviews, and logic-map branches can explain where the local question came from.
+
+## 2026-07-06 - Revision Logic Map control strip visibility
+
+### User-facing issue
+
+The Revision Logic Map left control strip still showed an explanatory `LOGIC MAP` text block that repeated information already implied by the graph. The `Visible logic` switch also sat too low in the strip and behaved like a decorative status item rather than a real layout control.
+
+### Change
+
+The left strip now removes the static explanatory block:
+
+```text
+LOGIC MAP
+Separate local questions by reasoning intent, not just time or window.
+```
+
+The visibility control moved into the map header as a persistent `Visible logic` switch. When it is on, the left control strip is shown with depth, inactive-path, removed-path, memory-note, and large-branch controls. When it is off, the entire left control strip is not rendered, and the graph canvas expands into that space.
+
+### Layout behavior
+
+```text
+Visible logic = on
+-> render BranchLane control strip
+-> graph uses remaining width
+
+Visible logic = off
+-> do not render BranchLane control strip
+-> graph flex area expands to the left
+-> no empty gutter is left behind
+```
+
+The same control applies in the normal embedded map and in fullscreen map mode, so the user sees consistent behavior in both layouts.
+
+### Memory and timeline effect
+
+```text
+memory_scope = none
+memory_effect = none
+timeline_effect = none
+storage_effect = none
+```
+
+This is a view-only change. It does not create, delete, discard, restore, or mutate project objects. It does not affect `EventLog`, `TimelineNode`, `ContextSnapshot`, document versions, selected text records, local threads, or LLM memory inclusion rules.
+
+## 2026-07-06 - Revision Logic Map full panel minimize
+
+### User-facing correction
+
+The previous `Visible logic` behavior only hid the left control strip. The intended behavior is broader: pressing `Visible logic` should minimize the entire Revision Logic Map panel so the main workspace above can use the released height.
+
+### Change
+
+The collapsed state moved from inside the timeline component to the outer app layout:
+
+```text
+expanded:
+main workspace row = flexible
+logic map row = 260px
+
+collapsed:
+main workspace row = flexible and taller
+logic map row = 50px restore bar
+```
+
+When collapsed, the Logic Map no longer renders the graph canvas or the left control strip. It renders only a compact restore bar with:
+
+```text
+Revision Logic Map
+Minimized status text
+Visible logic switch
+Show map button
+```
+
+Clicking `Visible logic` again or clicking `Show map` restores the full panel.
+
+### Layout behavior
+
+```text
+Visible logic = on
+-> full Revision Logic Map panel
+-> BranchLane controls visible
+-> graph canvas visible
+
+Visible logic = off
+-> entire Revision Logic Map panel minimized
+-> only restore bar remains
+-> app grid bottom row shrinks to 50px
+-> main / local / comparison panels expand vertically
+```
+
+The fullscreen map still uses the full BranchLane and graph canvas when the panel is expanded.
+
+### Memory and timeline effect
+
+```text
+memory_scope = none
+memory_effect = none
+timeline_effect = none
+storage_effect = none
+context_snapshot_effect = none
+```
+
+This remains a view-only UI state. It does not change active path, selected text records, local threads, document versions, EventLog entries, TimelineNode records, TimelineEdge records, LLM context, or future memory inclusion.
+
+## 2026-07-06 - Main chat filter bar collapse
+
+### User-facing issue
+
+The main answer window kept the message visibility filter bar pinned above the conversation:
+
+```text
+Active / Inactive / Removed / All
+Active messages are the only default main-chat memory path.
+```
+
+This was useful for inspecting active-path memory, but it could take too much space when the user simply wanted to read or select previous answers.
+
+### Change
+
+The filter bar now has a hide/show control:
+
+```text
+expanded:
+-> full Active / Inactive / Removed / All filter bar
+-> memory-path explanation visible
+-> hide icon button on the right
+
+collapsed:
+-> compact filter icon button only
+-> current filter name and count shown on desktop
+-> clicking it restores the full filter bar
+```
+
+The current selected filter is preserved while the bar is hidden. For example, hiding the bar while viewing `Active` messages keeps the conversation in the active-message view until the user opens the bar and chooses another filter.
+
+### Memory and timeline effect
+
+```text
+memory_scope = none
+memory_effect = none
+timeline_effect = none
+storage_effect = none
+context_snapshot_effect = none
+```
+
+This is a UI-only display preference inside the main answer panel. It does not mark messages active, inactive, discarded, deleted, restored, or removed. It also does not change EventLog records, TimelineNode records, ContextSnapshot generation, or future LLM memory inclusion.

@@ -54,6 +54,11 @@ type TimelineEdgeRoute = {
   stateChanged: boolean;
 };
 
+type VersionTimelineProps = {
+  isCollapsed?: boolean;
+  onCollapsedChange?: (collapsed: boolean) => void;
+};
+
 function edgeToneByView(view: HumanTimelineNode) {
   if (view.statusTone === "amber") {
     return "#d97706";
@@ -377,7 +382,10 @@ function TimelineGraphCanvas({
   );
 }
 
-export function VersionTimeline() {
+export function VersionTimeline({
+  isCollapsed = false,
+  onCollapsedChange
+}: VersionTimelineProps) {
   const [impactDialog, setImpactDialog] = useState<{
     mode: TimelineImpactMode;
     node: VersionNode;
@@ -827,6 +835,9 @@ export function VersionTimeline() {
   const zoomIn = () =>
     setZoom((value) => Math.min(1.25, Math.round((value + 0.1) * 100) / 100));
   const fitTimeline = () => setZoom(0.68);
+  const setCollapsed = (collapsed: boolean) => {
+    onCollapsedChange?.(collapsed);
+  };
   const zoomControls = (
     <div className="flex items-center gap-1 rounded-md border border-line bg-white p-1 text-xs font-bold text-slate-700">
       <button
@@ -858,6 +869,61 @@ export function VersionTimeline() {
       </button>
     </div>
   );
+  const logicControlToggle = (
+    <button
+      type="button"
+      onClick={() => setCollapsed(!isCollapsed)}
+      className="flex h-8 items-center gap-2 rounded-md border border-line bg-white px-3 text-xs font-bold text-slate-700 hover:bg-slate-50"
+      aria-pressed={!isCollapsed}
+      title={isCollapsed ? "Show logic map" : "Minimize logic map"}
+    >
+      <span>Visible logic</span>
+      <span
+        className={`h-5 w-9 rounded-full p-0.5 transition ${
+          !isCollapsed ? "bg-atlasBlue" : "bg-slate-300"
+        }`}
+      >
+        <span
+          className={`block h-4 w-4 rounded-full bg-white shadow transition ${
+            !isCollapsed ? "translate-x-4" : ""
+          }`}
+        />
+      </span>
+    </button>
+  );
+
+  if (isCollapsed) {
+    return (
+      <section
+        className={`panel flex min-h-0 items-center overflow-hidden rounded-lg max-[900px]:col-span-1 max-[900px]:col-start-auto ${
+          isNavigationCollapsed
+            ? "col-span-full"
+            : "col-span-full min-[901px]:col-start-1"
+        }`}
+      >
+        <div className="flex min-w-0 flex-1 items-center justify-between gap-3 px-4">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-bold text-ink">
+              Revision Logic Map
+            </h2>
+            <p className="truncate text-xs text-muted">
+              Minimized. Logic records, memory, and timeline data are unchanged.
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {logicControlToggle}
+            <button
+              type="button"
+              onClick={() => setCollapsed(false)}
+              className="h-8 rounded-md bg-atlasBlue px-3 text-xs font-bold text-white hover:bg-blue-700"
+            >
+              Show map
+            </button>
+          </div>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section
@@ -889,6 +955,7 @@ export function VersionTimeline() {
           <div className="flex h-12 items-center justify-between border-b border-line px-4">
             <h2 className="text-lg font-bold text-ink">Revision Logic Map</h2>
             <div className="flex items-center gap-2">
+              {logicControlToggle}
               {zoomControls}
               <button
                 onClick={() => setFullscreenOpen(true)}

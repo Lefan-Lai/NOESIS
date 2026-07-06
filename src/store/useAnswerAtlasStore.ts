@@ -217,6 +217,9 @@ export type TextSelectionInput = {
   sourceType?: TextSelectionModel["sourceType"];
   sourceId?: string;
   sourceDocumentVersionId?: string;
+  sourceDocumentVersionNumber?: number;
+  sourcePathStatus?: "active" | "inactive" | "discarded" | "deleted";
+  sourceVersionNodeId?: string;
   createdFromWindowId?: string;
   sourceThreadId?: string;
   sourceMessageId?: string;
@@ -2985,9 +2988,12 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
       const mainSession = mainWindow
         ? state.sessions[mainWindow.conversationSessionId]
         : null;
-      const sourceDocumentVersionId =
-        selection.sourceDocumentVersionId ?? `doc-version-${activeVersionNodeId}`;
       const sourceType = selection.sourceType ?? "document_version";
+      const sourceDocumentVersionId =
+        selection.sourceDocumentVersionId ??
+        (sourceType === "document_version"
+          ? `doc-version-${activeVersionNodeId}`
+          : undefined);
       const sourceId = selection.sourceId ?? sourceDocumentVersionId;
       const isLocalAnswerSelection = Boolean(
         selection.sourceLocalThreadId && selection.sourceAnswerId
@@ -3156,6 +3162,10 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
         return nextState;
       }
 
+      if (!sourceId) {
+        return state;
+      }
+
       const textSelectionResult = TextSelectionService.createOrGetSelection({
         state: revisionStateFromStore(state),
         projectId: state.currentProjectId,
@@ -3163,6 +3173,9 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
         sourceType,
         sourceId,
         sourceDocumentVersionId,
+        sourceDocumentVersionNumber: selection.sourceDocumentVersionNumber,
+        sourcePathStatus: selection.sourcePathStatus,
+        sourceVersionNodeId: selection.sourceVersionNodeId,
         sourceMessageId: selection.sourceMessageId,
         selectedText: selection.selectedText,
         startOffset: selection.startOffset,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { AppHeader } from "./AppHeader";
 import { MainDocumentPanel } from "@/components/document/MainDocumentPanel";
 import { SideThreadPanel } from "@/components/thread/SideThreadPanel";
@@ -32,6 +32,7 @@ export function AppShell({ documentId }: AppShellProps) {
   const activeRevisionBranchId = useAnswerAtlasStore(
     (state) => state.activeRevisionBranchId
   );
+  const [isLogicMapCollapsed, setIsLogicMapCollapsed] = useState(false);
   const threads = useAnswerAtlasStore((state) => state.threads);
   const discardThread = useAnswerAtlasStore((state) => state.discardThread);
   const deleteAnswer = useAnswerAtlasStore((state) => state.deleteAnswer);
@@ -39,6 +40,9 @@ export function AppShell({ documentId }: AppShellProps) {
   const gridClass = sideThreadVisible
     ? "grid-cols-[minmax(520px,1.08fr)_minmax(340px,0.78fr)_minmax(520px,1.08fr)]"
     : "grid-cols-[minmax(620px,1.08fr)_minmax(520px,0.92fr)]";
+  const gridRowClass = isLogicMapCollapsed
+    ? "grid-rows-[minmax(0,1fr)_50px] max-[1280px]:grid-rows-[minmax(430px,1fr)_minmax(460px,1fr)_50px]"
+    : "grid-rows-[minmax(0,1fr)_260px] max-[1280px]:grid-rows-[minmax(430px,1fr)_minmax(460px,1fr)_250px]";
 
   useEffect(() => {
     loadModels();
@@ -76,7 +80,7 @@ export function AppShell({ documentId }: AppShellProps) {
           </div>
         )}
         <div
-          className={`grid min-h-0 flex-1 ${gridClass} grid-rows-[minmax(0,1fr)_260px] gap-3 p-3 pt-0 max-[1280px]:grid-rows-[minmax(430px,1fr)_minmax(460px,1fr)_250px] max-[900px]:grid-cols-1 max-[900px]:grid-rows-none max-[900px]:auto-rows-auto max-[900px]:pt-3`}
+          className={`grid min-h-0 flex-1 ${gridClass} ${gridRowClass} gap-3 p-3 pt-0 max-[900px]:grid-cols-1 max-[900px]:grid-rows-none max-[900px]:auto-rows-auto max-[900px]:pt-3`}
         >
           <MainDocumentPanel documentId={documentId || currentDocumentId || ""} />
           {sideThreadVisible && <SideThreadPanel />}
@@ -85,7 +89,10 @@ export function AppShell({ documentId }: AppShellProps) {
           ) : (
             <ArgumentEvidenceComparison />
           )}
-          <VersionTimeline />
+          <VersionTimeline
+            isCollapsed={isLogicMapCollapsed}
+            onCollapsedChange={setIsLogicMapCollapsed}
+          />
         </div>
         <ContextDebugPanel />
         <UtilityPanel />

@@ -33,14 +33,6 @@ export function BranchLane({
 }: BranchLaneProps) {
   return (
     <div className="w-44 shrink-0 border-r border-line p-4">
-      <div className="mb-3">
-        <div className="text-xs font-bold uppercase tracking-wide text-slate-500">
-          Logic map
-        </div>
-        <div className="mt-1 text-[11px] leading-4 text-muted">
-          Separate local questions by reasoning intent, not just time or window.
-        </div>
-      </div>
       <div className="mb-4">
         <select
           value={String(maxVisibleDepth)}
@@ -58,12 +50,6 @@ export function BranchLane({
           <option value="2">Show nested logic</option>
           <option value="all">Show all logic rows</option>
         </select>
-      </div>
-      <div className="mb-4 flex items-center justify-between rounded-md border border-line p-3 text-sm">
-        <span className="font-bold text-ink">Visible logic</span>
-        <span className="h-6 w-11 rounded-full bg-atlasBlue p-0.5">
-          <span className="block h-5 w-5 rounded-full bg-white shadow" />
-        </span>
       </div>
       <div className="space-y-3 text-sm">
         <div className="flex items-center gap-2">

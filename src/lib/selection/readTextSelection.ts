@@ -5,6 +5,9 @@ export type SelectionSourcePayload = {
   sourceType: TextSelectionModel["sourceType"];
   sourceId: string;
   sourceDocumentVersionId?: string;
+  sourceDocumentVersionNumber?: number;
+  sourcePathStatus?: "active" | "inactive" | "discarded" | "deleted";
+  sourceVersionNodeId?: string;
   sourceMessageId?: string;
   sourceLocalThreadId?: string;
   sourceAnswerId?: string;
