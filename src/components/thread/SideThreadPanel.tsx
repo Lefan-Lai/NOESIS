@@ -1,13 +1,26 @@
 "use client";
 
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Anchor, CircleX, MessageSquarePlus, Minus, RotateCcw, Send, Sparkles, Trash2, UserRound } from "lucide-react";
+import {
+  Anchor,
+  CircleX,
+  GitCompareArrows,
+  LocateFixed,
+  MessageSquarePlus,
+  Minus,
+  RotateCcw,
+  Send,
+  Sparkles,
+  Trash2,
+  UserRound
+} from "lucide-react";
 import { useAnswerAtlasStore } from "@/store/useAnswerAtlasStore";
 import { ThreadMessageCard } from "./ThreadMessageCard";
 import { ThreadActionBar } from "./ThreadActionBar";
 import { DeleteAnswerDialog } from "./DeleteAnswerDialog";
 import type { TextSelectionDraft } from "@/components/document/DocumentAnswerRenderer";
 import type { ThreadMessage } from "@/types/thread";
+import { requestSourceFocus } from "@/lib/navigation/sourceLocator";
 
 function getAnchorDisplayLabel(blockId?: string) {
   return blockId ? blockId.toUpperCase() : "-";
@@ -23,6 +36,7 @@ export function SideThreadPanel() {
   const blocks = useAnswerAtlasStore((state) => state.blocks);
   const threads = useAnswerAtlasStore((state) => state.threads);
   const messages = useAnswerAtlasStore((state) => state.messages);
+  const comparisons = useAnswerAtlasStore((state) => state.comparisons);
   const annotations = useAnswerAtlasStore((state) => state.annotations);
   const revisionAnnotations = useAnswerAtlasStore(
     (state) => state.revisionAnnotations
@@ -65,6 +79,9 @@ export function SideThreadPanel() {
   const closeSideThread = useAnswerAtlasStore((state) => state.closeSideThread);
   const minimizeSideThread = useAnswerAtlasStore(
     (state) => state.minimizeSideThread
+  );
+  const openComparisonWindow = useAnswerAtlasStore(
+    (state) => state.openComparisonWindow
   );
 
   const anchor = selectedAnchorId ? anchors[selectedAnchorId] : null;
@@ -139,6 +156,22 @@ export function SideThreadPanel() {
     sourceDocumentVersion &&
       activeDocumentVersion &&
       sourceDocumentVersion.id !== activeDocumentVersion.id
+  );
+  const sourceMessageId =
+    sourceSelection?.sourceMessageId ?? anchor?.sourceMessageId ?? thread?.sourceMessageId;
+  const relatedComparisons = useMemo(
+    () =>
+      Object.values(comparisons)
+        .filter(
+          (comparison) =>
+            comparison.status !== "deleted" &&
+            comparison.anchorId === selectedAnchorId
+        )
+        .sort(
+          (a, b) =>
+            new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+        ),
+    [comparisons, selectedAnchorId]
   );
   const shouldShowContextNotesPanel =
     Boolean(thread && anchor && selectedText) &&
@@ -289,6 +322,33 @@ export function SideThreadPanel() {
                     {thread.status.replaceAll("_", " ")}
                   </span>
                 )}
+                <div className="ml-auto flex items-center gap-2">
+                  {relatedComparisons.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => openComparisonWindow(relatedComparisons[0].id)}
+                      className="flex h-7 items-center gap-1 rounded-md border border-purple-100 bg-purple-50 px-2 text-xs font-semibold text-atlasPurple hover:bg-purple-100"
+                      title="Open the semantic difference map for this local thread"
+                    >
+                      <GitCompareArrows size={13} />
+                      Map {relatedComparisons.length}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      requestSourceFocus({
+                        anchorId: anchor.id,
+                        sourceMessageId
+                      })
+                    }
+                    className="flex h-7 items-center gap-1 rounded-md border border-blue-100 bg-blue-50 px-2 text-xs font-semibold text-atlasBlue hover:bg-blue-100"
+                    title="Go to the selected source in the main answer"
+                  >
+                    <LocateFixed size={13} />
+                    Go to Source
+                  </button>
+                </div>
               </div>
               {isOlderSourceVersion && (
                 <div className="mb-4 rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-xs leading-5 text-orange-800">

@@ -135,6 +135,7 @@ export function DocumentAnswerRenderer({
   onMergeSelection
 }: DocumentAnswerRendererProps) {
   const rootRef = useRef<HTMLDivElement>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
   const [selection, setSelection] = useState<TextSelectionDraft | null>(null);
   const [position, setPosition] = useState<ToolbarPosition | null>(null);
   const activeReviewFocus = useAnswerAtlasStore(
@@ -186,6 +187,34 @@ export function DocumentAnswerRenderer({
     setSelection(null);
     setPosition(null);
   }
+
+  useEffect(() => {
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Node | null;
+
+      if (target && toolbarRef.current?.contains(target)) {
+        return;
+      }
+
+      clearToolbar();
+    }
+
+    function handleSelectionChange() {
+      const activeSelection = document.getSelection();
+
+      if (!activeSelection || activeSelection.isCollapsed) {
+        clearToolbar();
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("selectionchange", handleSelectionChange);
+
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("selectionchange", handleSelectionChange);
+    };
+  }, []);
 
   function handleMouseUp() {
     const root = rootRef.current;
@@ -247,6 +276,7 @@ export function DocumentAnswerRenderer({
 
       {selection && position && (
         <div
+          ref={toolbarRef}
           className="fixed z-50 flex -translate-x-1/2 items-center gap-1 rounded-full border border-blue-100 bg-white px-2 py-1 shadow-[0_14px_40px_rgba(15,23,42,0.18)]"
           style={{
             top: Math.max(72, position.top),

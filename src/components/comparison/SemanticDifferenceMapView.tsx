@@ -933,9 +933,6 @@ function DifferenceLens({
         <div className="text-xs font-bold uppercase tracking-wide text-muted">
           Layer 2 - Difference Lens
         </div>
-        <p className="mt-1 text-xs leading-5 text-muted">
-          Read the source answer as the base layer. Only changed, added, removed, or note-linked blocks are emphasized; the current difference is shown directly under each source sentence.
-        </p>
       </div>
       <div className="border-b border-line bg-white px-4 py-3">
         <ReviewFilterBar
@@ -1370,7 +1367,7 @@ export function SemanticDifferenceMapView({
     <div className="space-y-4">
       <Overview map={normalizedMap} />
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <div className="grid gap-4">
         <DifferenceLens
           rows={visibleRows}
           reviewFilter={reviewFilter}

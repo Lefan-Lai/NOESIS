@@ -60,15 +60,15 @@ export function BranchLane({
         </div>
         <div className="flex items-center gap-2">
           <span className="grid h-5 w-5 place-items-center rounded-full bg-atlasGreen text-xs font-bold text-white">
-            C
+            Q
           </span>
-          <span>logic focus</span>
+          <span>local question</span>
         </div>
         <div className="flex items-center gap-2">
           <span className="grid h-5 w-5 place-items-center rounded-full bg-atlasPurple text-xs font-bold text-white">
-            S
+            D
           </span>
-          <span>suggest / draft</span>
+          <span>draft / merge idea</span>
         </div>
         <div className="flex items-center gap-2">
           <span className="grid h-5 w-5 place-items-center rounded-full bg-amber-500 text-xs font-bold text-white">

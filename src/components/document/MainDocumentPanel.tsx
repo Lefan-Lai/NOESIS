@@ -14,12 +14,21 @@ import { DocumentToolbar } from "./DocumentToolbar";
 import { DiffReviewModal } from "./DiffReviewModal";
 import { DocumentVersionHistoryPanel } from "./DocumentVersionHistoryPanel";
 import {
+  conversationMessageIdFromSource,
+  focusMainMessageBySource,
+  focusMainSelectionByAnchor,
+  requestSourceFocus,
+  type SourceFocusRequest
+} from "@/lib/navigation/sourceLocator";
+import {
   ArrowLeft,
   ArrowRight,
   Bot,
   EyeOff,
   GitCompareArrows,
   History,
+  LocateFixed,
+  MessageSquare,
   PencilLine,
   RotateCcw,
   Send,
@@ -39,6 +48,8 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
   const [prompt, setPrompt] = useState("");
   const [chatVisibility, setChatVisibility] = useState<ChatVisibility>("active");
   const [isChatStatusBarVisible, setIsChatStatusBarVisible] = useState(true);
+  const [pendingSourceFocus, setPendingSourceFocus] =
+    useState<SourceFocusRequest | null>(null);
   const [editDraftId, setEditDraftId] = useState<string | null>(null);
   const [draftContent, setDraftContent] = useState("");
   const [diffForReview, setDiffForReview] = useState<TextDiff | null>(null);
@@ -74,12 +85,19 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
   const mainWindowId = useAnswerAtlasStore((state) => state.mainWindowId);
   const windows = useAnswerAtlasStore((state) => state.windows);
   const sessions = useAnswerAtlasStore((state) => state.sessions);
+  const anchors = useAnswerAtlasStore((state) => state.anchors);
+  const threads = useAnswerAtlasStore((state) => state.threads);
+  const comparisons = useAnswerAtlasStore((state) => state.comparisons);
   const conversationMessages = useAnswerAtlasStore(
     (state) => state.conversationMessages
   );
   const setWindowModel = useAnswerAtlasStore((state) => state.setWindowModel);
   const openSelectionBranch = useAnswerAtlasStore(
     (state) => state.openSelectionBranch
+  );
+  const openThread = useAnswerAtlasStore((state) => state.openThread);
+  const openComparisonWindow = useAnswerAtlasStore(
+    (state) => state.openComparisonWindow
   );
   const addNoteForSelection = useAnswerAtlasStore(
     (state) => state.addNoteForSelection
@@ -273,6 +291,48 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
     });
   }, [displayedMainMessages.length, isGeneratingDocument]);
 
+  useEffect(() => {
+    function handleSourceFocus(event: Event) {
+      const request = (event as CustomEvent<SourceFocusRequest>).detail;
+      const conversationMessageId = conversationMessageIdFromSource(
+        request?.sourceMessageId
+      );
+
+      if (conversationMessageId) {
+        const status = messageStatusById[conversationMessageId] ?? "active";
+
+        setChatVisibility(
+          status === "deleted" || status === "discarded" ? "removed" : status
+        );
+      }
+
+      setPendingSourceFocus(request);
+    }
+
+    window.addEventListener("answer-atlas:focus-source", handleSourceFocus);
+
+    return () =>
+      window.removeEventListener("answer-atlas:focus-source", handleSourceFocus);
+  }, [messageStatusById]);
+
+  useEffect(() => {
+    if (!pendingSourceFocus) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      const focused =
+        focusMainSelectionByAnchor(pendingSourceFocus.anchorId) ||
+        focusMainMessageBySource(pendingSourceFocus.sourceMessageId);
+
+      if (focused) {
+        setPendingSourceFocus(null);
+      }
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [displayedMainMessages, pendingSourceFocus]);
+
   const blocks = useMemo(() => {
     if (!document || !activeVersionNodeId) {
       return [];
@@ -412,6 +472,50 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
     return messageId.startsWith("conv-assistant-")
       ? messageId.replace("conv-assistant-", "rev-message-assistant-")
       : messageId;
+  }
+
+  function localThreadsForSourceMessage(sourceMessageId: string) {
+    return Object.values(threads)
+      .filter((thread) => {
+        const anchor = anchors[thread.anchorId];
+
+        return (
+          thread.status !== "deleted" &&
+          (thread.sourceMessageId === sourceMessageId ||
+            anchor?.sourceMessageId === sourceMessageId)
+        );
+      })
+      .sort(
+        (a, b) =>
+          new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+      );
+  }
+
+  function mapComparisonsForSourceMessage(sourceMessageId: string) {
+    return Object.values(comparisons)
+      .filter((comparison) => {
+        const anchor = anchors[comparison.anchorId];
+
+        return (
+          comparison.status !== "deleted" &&
+          anchor?.sourceMessageId === sourceMessageId
+        );
+      })
+      .sort(
+        (a, b) =>
+          new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+      );
+  }
+
+  function openLocalThreadFromAnswer(
+    threadId: string,
+    anchorId?: string,
+    sourceMessageId?: string
+  ) {
+    openThread(threadId);
+    window.setTimeout(() => {
+      requestSourceFocus({ anchorId, sourceMessageId });
+    });
   }
 
   return (
@@ -575,10 +679,31 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
                 const revisionMessageId = revisionMessageIdForConversation(
                   message.id
                 );
+                const relatedLocalThreads = isUser
+                  ? []
+                  : localThreadsForSourceMessage(revisionMessageId);
+                const relatedComparisons = isUser
+                  ? []
+                  : mapComparisonsForSourceMessage(revisionMessageId);
                 const isLatestAssistant =
                   pathStatus === "active" &&
                   !isUser &&
                   message.id === latestAssistantMessage?.id;
+                const displayModelName =
+                  !isUser &&
+                  (message.modelName ??
+                    message.modelConfigId ??
+                    mainWindow?.modelConfigId);
+                const assistantStatusLabel =
+                  pathStatus === "active"
+                    ? isLatestAssistant
+                      ? "Active"
+                      : "Earlier"
+                    : pathStatus === "inactive"
+                      ? "Historical"
+                      : pathStatus === "discarded"
+                        ? "Discarded"
+                        : "Deleted";
                 const canSelectAssistantAnswer =
                   !isUser &&
                   document &&
@@ -618,18 +743,52 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
                           {isUser ? "You" : "Assistant"}
                         </span>
                         <span className="flex items-center gap-1">
-                          {pathStatus !== "active" && (
+                          {!isUser && (
                             <span
                               className={`rounded px-2 py-0.5 text-xs font-bold uppercase tracking-wide ${
                                 pathStatus === "deleted"
                                   ? "bg-red-100 text-red-700"
                                   : pathStatus === "discarded"
                                     ? "bg-amber-100 text-amber-700"
-                                    : "bg-slate-200 text-slate-600"
+                                    : pathStatus === "inactive"
+                                      ? "bg-slate-200 text-slate-600"
+                                      : isLatestAssistant
+                                        ? "bg-emerald-50 text-emerald-700"
+                                        : "bg-blue-50 text-atlasBlue"
                               }`}
                             >
-                              {pathStatus}
+                              {assistantStatusLabel}
                             </span>
+                          )}
+                          {!isUser && relatedLocalThreads.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                openLocalThreadFromAnswer(
+                                  relatedLocalThreads[0].id,
+                                  relatedLocalThreads[0].anchorId,
+                                  revisionMessageId
+                                )
+                              }
+                              className="flex h-7 items-center gap-1 rounded-md border border-blue-100 bg-blue-50 px-2 text-xs font-semibold text-atlasBlue hover:bg-blue-100"
+                              title="Open a local thread created from this answer"
+                            >
+                              <MessageSquare size={13} />
+                              Local {relatedLocalThreads.length}
+                            </button>
+                          )}
+                          {!isUser && relatedComparisons.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                openComparisonWindow(relatedComparisons[0].id)
+                              }
+                              className="flex h-7 items-center gap-1 rounded-md border border-purple-100 bg-purple-50 px-2 text-xs font-semibold text-atlasPurple hover:bg-purple-100"
+                              title="Open a semantic difference map created from this answer"
+                            >
+                              <GitCompareArrows size={13} />
+                              Map {relatedComparisons.length}
+                            </button>
                           )}
                           {!isUser && isLatestAssistant && (
                             <>
@@ -669,11 +828,11 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
                               </button>
                             </>
                           )}
-                          {!isUser && message.modelName && (
+                          {!isUser && displayModelName && (
                             <span className="rounded bg-blue-50 px-2 py-0.5 text-xs text-atlasBlue">
-                              {message.modelName === "gpt-5.5"
+                              {displayModelName === "gpt-5.5"
                                 ? "GPT-5.5"
-                                : message.modelName}
+                                : displayModelName}
                             </span>
                           )}
                         </span>
@@ -720,6 +879,72 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
                               {pathStatus === "active"
                                 ? "Earlier answer. Local questions stay attached to this answer."
                                 : "Historical answer. Local questions stay attached to this non-active path."}
+                            </div>
+                          )}
+                          {relatedLocalThreads.length > 0 && (
+                            <div className="flex flex-wrap gap-2 rounded-md border border-blue-100 bg-blue-50/45 px-2.5 py-2 text-xs">
+                              <span className="flex items-center gap-1 font-bold text-atlasBlue">
+                                <LocateFixed size={13} />
+                                Source locals
+                              </span>
+                              {relatedLocalThreads.map((thread, index) => {
+                                const threadAnchor = anchors[thread.anchorId];
+
+                                return (
+                                  <button
+                                    id={`source-anchor-${thread.anchorId}`}
+                                    key={thread.id}
+                                    type="button"
+                                    onClick={() =>
+                                      openLocalThreadFromAnswer(
+                                        thread.id,
+                                        thread.anchorId,
+                                        revisionMessageId
+                                      )
+                                    }
+                                    className="max-w-[260px] truncate rounded-full border border-blue-200 bg-white px-2 py-0.5 font-semibold text-slate-700 hover:border-atlasBlue hover:text-atlasBlue"
+                                    title={
+                                      threadAnchor?.selectedText ??
+                                      thread.selectedText ??
+                                      "Open related local thread"
+                                    }
+                                  >
+                                    {index + 1}.{" "}
+                                    {threadAnchor?.selectedText ??
+                                      thread.selectedText ??
+                                      "related local thread"}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                          {relatedComparisons.length > 0 && (
+                            <div className="flex flex-wrap gap-2 rounded-md border border-purple-100 bg-purple-50/45 px-2.5 py-2 text-xs">
+                              <span className="flex items-center gap-1 font-bold text-atlasPurple">
+                                <GitCompareArrows size={13} />
+                                Semantic maps
+                              </span>
+                              {relatedComparisons.map((comparison, index) => {
+                                const comparisonAnchor = anchors[comparison.anchorId];
+
+                                return (
+                                  <button
+                                    key={comparison.id}
+                                    type="button"
+                                    onClick={() => openComparisonWindow(comparison.id)}
+                                    className="max-w-[260px] truncate rounded-full border border-purple-200 bg-white px-2 py-0.5 font-semibold text-slate-700 hover:border-atlasPurple hover:text-atlasPurple"
+                                    title={
+                                      comparisonAnchor?.selectedText ??
+                                      "Open semantic difference map"
+                                    }
+                                  >
+                                    {index + 1}.{" "}
+                                    {comparisonAnchor?.selectedText ??
+                                      comparison.semanticMap?.overview.mainSummary ??
+                                      "semantic difference map"}
+                                  </button>
+                                );
+                              })}
                             </div>
                           )}
                           <DocumentAnswerRenderer

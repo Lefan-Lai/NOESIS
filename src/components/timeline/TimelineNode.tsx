@@ -323,7 +323,7 @@ export function TimelineNode({
             className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left hover:bg-slate-50"
           >
             <GitBranch size={15} />
-            Open Related Thread
+            Open Related Window
           </button>
           {onStartNewLogic && (
             <button

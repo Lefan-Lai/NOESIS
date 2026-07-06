@@ -7,7 +7,8 @@ import {
   Maximize2,
   MoreHorizontal,
   Send,
-  UserRound
+  UserRound,
+  X
 } from "lucide-react";
 import { useAnswerAtlasStore } from "@/store/useAnswerAtlasStore";
 import { getComparisonForAnchor } from "@/lib/comparison/buildArgumentComparison";
@@ -34,10 +35,16 @@ export function ArgumentEvidenceComparison() {
   );
   const anchors = useAnswerAtlasStore((state) => state.anchors);
   const selectedAnchorId = useAnswerAtlasStore((state) => state.selectedAnchorId);
-  const comparison = getComparisonForAnchor(comparisons, selectedAnchorId);
   const activeTreeWindowId = useAnswerAtlasStore(
     (state) => state.activeTreeWindowId
   );
+  const activeWindowComparison = activeTreeWindowId
+    ? Object.values(comparisons).find(
+        (item) => `window-tree-${item.id}` === activeTreeWindowId
+      ) ?? null
+    : null;
+  const comparison =
+    activeWindowComparison ?? getComparisonForAnchor(comparisons, selectedAnchorId);
   const windows = useAnswerAtlasStore((state) => state.windows);
   const sessions = useAnswerAtlasStore((state) => state.sessions);
   const conversationMessages = useAnswerAtlasStore(
@@ -61,6 +68,9 @@ export function ArgumentEvidenceComparison() {
   );
   const toggleComparisonExpanded = useAnswerAtlasStore(
     (state) => state.toggleComparisonExpanded
+  );
+  const closeComparisonWindow = useAnswerAtlasStore(
+    (state) => state.closeComparisonWindow
   );
   const treeWindow =
     (activeTreeWindowId ? windows[activeTreeWindowId] : null) ??
@@ -296,6 +306,14 @@ export function ArgumentEvidenceComparison() {
               aria-label="Expand"
             >
               <Maximize2 size={16} />
+            </button>
+            <button
+              onClick={closeComparisonWindow}
+              className="grid h-8 w-8 place-items-center rounded-md border border-line text-slate-700 hover:bg-slate-100"
+              title="Close map"
+              aria-label="Close map"
+            >
+              <X size={16} />
             </button>
             <div className="relative">
               <button

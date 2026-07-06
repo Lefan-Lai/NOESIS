@@ -32,17 +32,30 @@ export function AppShell({ documentId }: AppShellProps) {
   const activeRevisionBranchId = useAnswerAtlasStore(
     (state) => state.activeRevisionBranchId
   );
+  const activeTreeWindowId = useAnswerAtlasStore(
+    (state) => state.activeTreeWindowId
+  );
   const [isLogicMapCollapsed, setIsLogicMapCollapsed] = useState(false);
   const threads = useAnswerAtlasStore((state) => state.threads);
   const discardThread = useAnswerAtlasStore((state) => state.discardThread);
   const deleteAnswer = useAnswerAtlasStore((state) => state.deleteAnswer);
   const sideThreadVisible = isSideThreadOpen && !isSideThreadMinimized;
-  const gridClass = sideThreadVisible
+  const rightPanelVisible = Boolean(activeRevisionBranchId || activeTreeWindowId);
+  const topPanelCount = 1 + Number(sideThreadVisible) + Number(rightPanelVisible);
+  const gridClass =
+    sideThreadVisible && rightPanelVisible
     ? "grid-cols-[minmax(520px,1.08fr)_minmax(340px,0.78fr)_minmax(520px,1.08fr)]"
-    : "grid-cols-[minmax(620px,1.08fr)_minmax(520px,0.92fr)]";
-  const gridRowClass = isLogicMapCollapsed
-    ? "grid-rows-[minmax(0,1fr)_50px] max-[1280px]:grid-rows-[minmax(430px,1fr)_minmax(460px,1fr)_50px]"
-    : "grid-rows-[minmax(0,1fr)_260px] max-[1280px]:grid-rows-[minmax(430px,1fr)_minmax(460px,1fr)_250px]";
+    : sideThreadVisible || rightPanelVisible
+      ? "grid-cols-[minmax(620px,1.08fr)_minmax(520px,0.92fr)]"
+      : "grid-cols-1";
+  const gridRowClass =
+    topPanelCount > 1
+      ? isLogicMapCollapsed
+        ? "grid-rows-[minmax(0,1fr)_50px] max-[1280px]:grid-rows-[minmax(430px,1fr)_minmax(460px,1fr)_50px]"
+        : "grid-rows-[minmax(0,1fr)_260px] max-[1280px]:grid-rows-[minmax(430px,1fr)_minmax(460px,1fr)_250px]"
+      : isLogicMapCollapsed
+        ? "grid-rows-[minmax(0,1fr)_50px] max-[1280px]:grid-rows-[minmax(430px,1fr)_50px]"
+        : "grid-rows-[minmax(0,1fr)_260px] max-[1280px]:grid-rows-[minmax(430px,1fr)_250px]";
 
   useEffect(() => {
     loadModels();
@@ -84,10 +97,12 @@ export function AppShell({ documentId }: AppShellProps) {
         >
           <MainDocumentPanel documentId={documentId || currentDocumentId || ""} />
           {sideThreadVisible && <SideThreadPanel />}
-          {activeRevisionBranchId ? (
-            <RevisionBranchPanel />
-          ) : (
-            <ArgumentEvidenceComparison />
+          {rightPanelVisible && (
+            activeRevisionBranchId ? (
+              <RevisionBranchPanel />
+            ) : (
+              <ArgumentEvidenceComparison />
+            )
           )}
           <VersionTimeline
             isCollapsed={isLogicMapCollapsed}

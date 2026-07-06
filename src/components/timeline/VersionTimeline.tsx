@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { Maximize2, Minus, Plus, X } from "lucide-react";
 import { useAnswerAtlasStore } from "@/store/useAnswerAtlasStore";
+import { requestSourceFocus } from "@/lib/navigation/sourceLocator";
 import type { VersionNode } from "@/types/version";
 import { BranchLane } from "./BranchLane";
 import { TimelineNode } from "./TimelineNode";
@@ -124,6 +125,17 @@ function canAssignLogicNode(node: VersionNode) {
       node.relatedBranchId ||
       (node.relatedAnchorId && node.nodeType !== "anchor_selected")
   );
+}
+
+function sourceMessageIdForVersionNode(node: VersionNode) {
+  const answerPrefixes = ["v-created-", "v-main-answer-"];
+  const answerPrefix = answerPrefixes.find((prefix) => node.id.startsWith(prefix));
+
+  if (answerPrefix) {
+    return `rev-message-assistant-${node.id.slice(answerPrefix.length)}`;
+  }
+
+  return undefined;
 }
 
 function edgePath(route: TimelineEdgeRoute) {
@@ -402,6 +414,7 @@ export function VersionTimeline({
   const anchors = useAnswerAtlasStore((state) => state.anchors);
   const threads = useAnswerAtlasStore((state) => state.threads);
   const branches = useAnswerAtlasStore((state) => state.branches);
+  const comparisons = useAnswerAtlasStore((state) => state.comparisons);
   const documents = useAnswerAtlasStore((state) => state.documents);
   const conversationMessages = useAnswerAtlasStore(
     (state) => state.conversationMessages
@@ -414,6 +427,9 @@ export function VersionTimeline({
     (state) => state.activeVersionNodeId
   );
   const openThread = useAnswerAtlasStore((state) => state.openThread);
+  const openComparisonWindow = useAnswerAtlasStore(
+    (state) => state.openComparisonWindow
+  );
   const deleteAnswer = useAnswerAtlasStore((state) => state.deleteAnswer);
   const revertToNode = useAnswerAtlasStore((state) => state.revertToNode);
   const setLogicAssignment = useAnswerAtlasStore(
@@ -748,9 +764,41 @@ export function VersionTimeline({
     });
   };
   const openRelatedThread = (node: VersionNode) => {
+    const thread = node.relatedThreadId ? threads[node.relatedThreadId] : null;
+    const anchor =
+      (node.relatedAnchorId ? anchors[node.relatedAnchorId] : null) ??
+      (thread?.anchorId ? anchors[thread.anchorId] : null);
+    const sourceMessageId =
+      anchor?.sourceMessageId ??
+      thread?.sourceMessageId ??
+      sourceMessageIdForVersionNode(node);
+
     if (node.relatedThreadId) {
       openThread(node.relatedThreadId);
     }
+
+    const relatedComparison = anchor
+      ? Object.values(comparisons)
+          .filter(
+            (comparison) =>
+              comparison.status !== "deleted" &&
+              comparison.anchorId === anchor.id
+          )
+          .sort(
+            (a, b) =>
+              new Date(b.updatedAt).getTime() -
+              new Date(a.updatedAt).getTime()
+          )[0]
+      : null;
+
+    if (relatedComparison) {
+      openComparisonWindow(relatedComparison.id);
+    }
+
+    requestSourceFocus({
+      anchorId: anchor?.id ?? thread?.anchorId ?? node.relatedAnchorId,
+      sourceMessageId
+    });
   };
   const sharesLogicScope = (
     first?: HumanTimelineNode,

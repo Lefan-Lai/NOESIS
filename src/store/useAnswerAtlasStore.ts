@@ -585,6 +585,8 @@ export type AnswerAtlasState = {
   closeSideThread: () => void;
   minimizeSideThread: () => void;
   restoreSideThread: () => void;
+  openComparisonWindow: (comparisonId: string) => void;
+  closeComparisonWindow: () => void;
   toggleComparisonExpanded: () => void;
   closeRevisionBranchPanel: () => void;
   saveRevisionBranchDraft: (branchId: string, draftContent: string) => void;
@@ -2094,6 +2096,72 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
     set({
       isSideThreadOpen: true,
       isSideThreadMinimized: false
+    });
+  },
+
+  openComparisonWindow: (comparisonId) => {
+    set((state) => {
+      const comparison = state.comparisons[comparisonId];
+
+      if (!comparison || comparison.status === "deleted") {
+        return state;
+      }
+
+      const now = new Date().toISOString();
+      const windowId = treeWindowId(comparison.id);
+      const sessionId = treeSessionId(comparison.id);
+      const contextScope = treeContextScope({
+        currentDocumentId: comparison.documentId,
+        comparisonId: comparison.id
+      });
+      const existingWindow = state.windows[windowId];
+      const existingSession = state.sessions[sessionId];
+
+      return {
+        ...state,
+        activeTreeWindowId: windowId,
+        windows: {
+          ...state.windows,
+          [windowId]: {
+            id: windowId,
+            workspaceId: state.currentProjectId,
+            windowType: "tree_compare",
+            title: "Semantic Difference Map",
+            conversationSessionId: sessionId,
+            modelConfigId:
+              existingWindow?.modelConfigId ?? state.selectedModel ?? DEFAULT_MODEL,
+            contextScope,
+            linkedDocumentId: comparison.documentId,
+            layout: existingWindow?.layout ?? { isMinimized: false },
+            createdAt: existingWindow?.createdAt ?? now,
+            updatedAt: now
+          }
+        },
+        sessions: {
+          ...state.sessions,
+          [sessionId]: {
+            id: sessionId,
+            workspaceId: state.currentProjectId,
+            windowId,
+            sessionType: "tree_chat",
+            modelConfigId:
+              existingSession?.modelConfigId ??
+              existingWindow?.modelConfigId ??
+              state.selectedModel ??
+              DEFAULT_MODEL,
+            contextScope,
+            createdAt: existingSession?.createdAt ?? now,
+            updatedAt: now
+          }
+        }
+      };
+    });
+  },
+
+  closeComparisonWindow: () => {
+    set({
+      activeTreeWindowId: null,
+      isComparisonExpanded: false
     });
   },
 
@@ -3980,7 +4048,7 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
           const comparisonWindow: WindowInstance = nextState.windows[comparisonWindowId] ?? {
             id: comparisonWindowId,
             workspaceId: "default",
-            windowType: "tree_comparison",
+            windowType: "tree_compare",
             title: "Semantic Difference Map",
             conversationSessionId: comparisonSessionId,
             modelConfigId: data.model,

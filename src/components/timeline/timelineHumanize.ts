@@ -6,6 +6,7 @@ import type { Branch, VersionNode } from "@/types/version";
 export type TimelineLaneId = string;
 
 const MAIN_ROW_ID = "row-main";
+const MAIN_ROW_PREFIX = `${MAIN_ROW_ID}-`;
 const MEMORY_ROW_ID = "row-memory";
 const INACTIVE_ROW_ID = "row-inactive";
 
@@ -117,6 +118,27 @@ function stableHash(value: string) {
 
 function rowSafeId(value: string) {
   return stableHash(value);
+}
+
+function mainRowIdForRoot(rootId: string) {
+  return `${MAIN_ROW_PREFIX}${rowSafeId(rootId)}`;
+}
+
+function isMainReasoningRow(rowId: TimelineLaneId) {
+  return rowId === MAIN_ROW_ID || rowId.startsWith(MAIN_ROW_PREFIX);
+}
+
+function scopedRowIdForMain(rowId: TimelineLaneId, mainRootId?: string) {
+  if (
+    !mainRootId ||
+    isMainReasoningRow(rowId) ||
+    rowId === MEMORY_ROW_ID ||
+    rowId === INACTIVE_ROW_ID
+  ) {
+    return rowId;
+  }
+
+  return `${rowId}-main-${rowSafeId(mainRootId)}`;
 }
 
 const LOGIC_FOCUS_PATTERNS = [
@@ -540,6 +562,16 @@ function selectedTextForNode(node: VersionNode, context: HumanTimelineContext) {
   return anchor?.selectedText || thread?.selectedText || branch?.selectedText;
 }
 
+function sourceAnchorForNode(node: VersionNode, context: HumanTimelineContext) {
+  const { anchor, thread, branch } = getRelatedObjects(node, context);
+
+  return (
+    anchor ??
+    (thread?.anchorId ? context.anchors[thread.anchorId] : undefined) ??
+    (branch?.anchorId ? context.anchors[branch.anchorId] : undefined)
+  );
+}
+
 function logicFocusForNode(
   node: VersionNode,
   context: HumanTimelineContext,
@@ -764,6 +796,26 @@ function sourceMessageNodeId(
   return undefined;
 }
 
+function sourceParentNodeIdForNode(
+  node: VersionNode,
+  context: HumanTimelineContext,
+  byId: Record<string, VersionNode>,
+  fallbackMainNodeId?: string
+) {
+  const anchor = sourceAnchorForNode(node, context);
+  const sourceParentId = sourceMessageNodeId(anchor?.sourceMessageId, byId);
+
+  if (sourceParentId) {
+    return sourceParentId;
+  }
+
+  if (anchor?.sourceThreadId) {
+    return node.parentId ?? undefined;
+  }
+
+  return fallbackMainNodeId ?? node.parentId ?? undefined;
+}
+
 function rowIdForNode(
   node: VersionNode,
   context: HumanTimelineContext,
@@ -914,12 +966,15 @@ function toneForNode(
     return "slate";
   }
 
-  if (node.nodeType === "anchor_selected" || node.nodeType === "local_question_asked") {
+  if (
+    node.nodeType === "anchor_selected" ||
+    node.nodeType === "local_question_asked" ||
+    node.nodeType === "local_answer_generated"
+  ) {
     return "green";
   }
 
   if (
-    node.nodeType === "local_answer_generated" ||
     node.nodeType === "branch_created" ||
     node.nodeType === "revision_generated"
   ) {
@@ -962,7 +1017,7 @@ function titleForNode(node: VersionNode, context: HumanTimelineContext) {
   }
 
   if (node.nodeType === "anchor_selected") {
-    return actionTitle("Source", selectedText, "Selected source");
+    return actionTitle("Selected source", selectedText, "Selected source");
   }
 
   if (node.nodeType === "local_question_asked") {
@@ -971,9 +1026,9 @@ function titleForNode(node: VersionNode, context: HumanTimelineContext) {
 
   if (node.nodeType === "local_answer_generated") {
     return actionTitle(
-      "Answer",
-      localQuestion || localAnswer || selectedText,
-      "Local answer"
+      "Question",
+      localQuestion || selectedText || localAnswer,
+      "Local question"
     );
   }
 
@@ -1041,7 +1096,7 @@ function shortTitleForNode(node: VersionNode, context: HumanTimelineContext) {
   }
 
   if (node.nodeType === "anchor_selected") {
-    return actionShortTitle("Source", selectedText, "Source text");
+    return actionShortTitle("Selected", selectedText, "Selected source");
   }
 
   if (node.nodeType === "local_question_asked") {
@@ -1049,7 +1104,11 @@ function shortTitleForNode(node: VersionNode, context: HumanTimelineContext) {
   }
 
   if (node.nodeType === "local_answer_generated") {
-    return actionShortTitle("Answer", localQuestion || localAnswer || selectedText, "Local answer");
+    return actionShortTitle(
+      "Q",
+      localQuestion || selectedText || localAnswer,
+      "Local question"
+    );
   }
 
   if (node.nodeType === "annotation_added") {
@@ -1105,7 +1164,7 @@ function relationForNode(node: VersionNode, laneId: TimelineLaneId) {
   }
 
   if (node.nodeType === "anchor_selected") {
-    return "source text";
+    return "source anchor";
   }
 
   if (node.nodeType === "local_question_asked") {
@@ -1113,7 +1172,7 @@ function relationForNode(node: VersionNode, laneId: TimelineLaneId) {
   }
 
   if (node.nodeType === "local_answer_generated") {
-    return "suggest";
+    return "local question";
   }
 
   if (node.nodeType === "revision_generated") {
@@ -1155,7 +1214,17 @@ function subtitleForNode(node: VersionNode, context: HumanTimelineContext) {
 
   if (node.nodeType === "local_answer_generated") {
     if (localQuestion) {
-      return `Local question: ${excerpt(localQuestion)}`;
+      const parts = [`Question: ${excerpt(localQuestion)}`];
+
+      if (selectedText) {
+        parts.push(`Source: ${excerpt(selectedText)}`);
+      }
+
+      if (localAnswer) {
+        parts.push(`Reply: ${excerpt(localAnswer)}`);
+      }
+
+      return parts.join(" | ");
     }
 
     if (localAnswer) {
@@ -1329,7 +1398,7 @@ export function humanizeTimelineNode(
 
 function columnStepForNode(node: VersionNode) {
   if (node.nodeType === "anchor_selected") {
-    return 0.58;
+    return 0;
   }
 
   if (node.nodeType === "local_question_asked") {
@@ -1337,7 +1406,7 @@ function columnStepForNode(node: VersionNode) {
   }
 
   if (node.nodeType === "local_answer_generated") {
-    return 1.05;
+    return 0.72;
   }
 
   if (node.nodeType === "branch_created" || node.nodeType === "revision_generated") {
@@ -1478,6 +1547,67 @@ function assignLogicLayout(nodes: HumanTimelineNode[]) {
   });
 }
 
+function scopeRowsToMainReasoningUnits(nodes: HumanTimelineNode[]) {
+  const nodeById = new Map(nodes.map((view) => [view.id, view]));
+  const mainRootByNodeId = new Map<string, string | undefined>();
+
+  const resolveMainRoot = (nodeId?: string | null): string | undefined => {
+    if (!nodeId) {
+      return undefined;
+    }
+
+    if (mainRootByNodeId.has(nodeId)) {
+      return mainRootByNodeId.get(nodeId);
+    }
+
+    const view = nodeById.get(nodeId);
+
+    if (!view) {
+      mainRootByNodeId.set(nodeId, undefined);
+      return undefined;
+    }
+
+    if (isMainProgressNode(view.node)) {
+      const mainRoot = view.branchGroupId || view.id;
+
+      mainRootByNodeId.set(nodeId, mainRoot);
+      return mainRoot;
+    }
+
+    const mainRoot = resolveMainRoot(resolvedVisualParentId(view));
+
+    mainRootByNodeId.set(nodeId, mainRoot);
+    return mainRoot;
+  };
+
+  const scopedNodes = nodes.map((view) => {
+    const mainRootId = isMainProgressNode(view.node)
+      ? view.branchGroupId || view.id
+      : resolveMainRoot(resolvedVisualParentId(view));
+    const laneId = isMainProgressNode(view.node)
+      ? mainRowIdForRoot(mainRootId || view.id)
+      : scopedRowIdForMain(view.laneId, mainRootId);
+
+    return {
+      ...view,
+      laneId
+    };
+  });
+  const stackBySlot = new Map<string, number>();
+
+  return scopedNodes.map((view) => {
+    const key = `${view.laneId}:${view.logicColumn.toFixed(2)}`;
+    const stackIndex = stackBySlot.get(key) ?? 0;
+
+    stackBySlot.set(key, stackIndex + 1);
+
+    return {
+      ...view,
+      stackIndex
+    };
+  });
+}
+
 export function buildHumanTimeline(
   nodes: VersionNode[],
   context: HumanTimelineContext,
@@ -1568,6 +1698,10 @@ export function buildHumanTimeline(
       return [];
     }
 
+    if (node.nodeType === "anchor_selected") {
+      return [];
+    }
+
     const inactive = isInactiveNode(node);
 
     if (inactive && !options.showInactive) {
@@ -1602,12 +1736,12 @@ export function buildHumanTimeline(
     const anchor = node.relatedAnchorId
       ? context.anchors[node.relatedAnchorId]
       : undefined;
-    const selectionSourceParentId =
-      isSelectionNode(node)
-        ? sourceMessageNodeId(anchor?.sourceMessageId, byId) ??
-          (!anchor?.sourceThreadId ? latestMainBeforeById.get(node.id) : undefined) ??
-          node.parentId
-        : undefined;
+    const sourceParentId = sourceParentNodeIdForNode(
+      node,
+      context,
+      byId,
+      latestMainBeforeById.get(node.id)
+    );
     const directParentNode = node.parentId ? byId[node.parentId] : undefined;
     const latestMainParentId = latestMainBeforeById.get(node.id);
     const mainLogicRoute =
@@ -1634,9 +1768,7 @@ export function buildHumanTimeline(
     const visualParentId =
       node.nodeType === "document_revised" || node.nodeType === "reverted"
         ? mainProgressVisualParentId
-        : node.nodeType === "anchor_selected"
-          ? selectionSourceParentId
-          : node.nodeType === "merged"
+        : node.nodeType === "merged"
             ? latestBranchNodeId ??
               latestFocusNodeId ??
               latestThreadNodeId ??
@@ -1647,13 +1779,16 @@ export function buildHumanTimeline(
                 latestThreadNodeId ??
                 latestBranchNodeId ??
                 latestHubNodeId ??
-                (hubId && hubId !== node.id ? hubId : node.parentId)
+                (hubId && hubId !== node.id ? hubId : sourceParentId ?? node.parentId)
               : node.relatedThreadId
                 ? latestFocusNodeId ??
+                  latestThreadNodeId ??
+                  sourceParentId ??
                   (hubId && hubId !== node.id ? hubId : node.parentId)
                 : node.relatedBranchId
                   ? latestBranchNodeId ??
                     latestFocusNodeId ??
+                    sourceParentId ??
                     (hubId && hubId !== node.id ? hubId : node.parentId)
                   : hubId && hubId !== node.id
                     ? hubId
@@ -1666,9 +1801,18 @@ export function buildHumanTimeline(
     const hubDepth = hubId ? displayDepthById.get(hubId) : undefined;
     let depth = rawDepth;
 
+    const isFirstThreadProgressNode = Boolean(
+      node.relatedThreadId &&
+        isThreadProgressNode(node) &&
+        !latestThreadNodeId &&
+        sourceParentId
+    );
+
     if (isMainProgressNode(node)) {
       depth = 0;
     } else if (isSelectionNode(node)) {
+      depth = (visualParentDepth ?? parentDepth(node, byId, depthById)) + 1;
+    } else if (isFirstThreadProgressNode) {
       depth = (visualParentDepth ?? parentDepth(node, byId, depthById)) + 1;
     } else if (node.nodeType === "branch_created" || node.nodeType === "revision_generated") {
       depth = hubDepth ?? visualParentDepth ?? rawDepth;
@@ -1768,7 +1912,7 @@ export function buildHumanTimeline(
 
     return [humanNode];
   });
-  let laidOutNodes = assignLogicLayout(humanNodes);
+  let laidOutNodes = scopeRowsToMainReasoningUnits(assignLogicLayout(humanNodes));
   const initialNodesByRow = new Map<TimelineLaneId, HumanTimelineNode[]>();
 
   laidOutNodes.forEach((node) => {
@@ -1805,7 +1949,7 @@ export function buildHumanTimeline(
 
   initialRowMeta.forEach((meta) => {
     if (
-      meta.rowId === MAIN_ROW_ID ||
+      isMainReasoningRow(meta.rowId) ||
       meta.rowId === MEMORY_ROW_ID ||
       meta.rowId === INACTIVE_ROW_ID
     ) {
@@ -1854,6 +1998,7 @@ export function buildHumanTimeline(
   });
 
   const nodeRowById = new Map(laidOutNodes.map((node) => [node.id, node.laneId]));
+  const laidOutNodeById = new Map(laidOutNodes.map((node) => [node.id, node]));
   const rowMeta = Array.from(nodesByRow.entries()).map(([rowId, rowNodes]) => {
     const sortedRowNodes = [...rowNodes].sort(
       (a, b) =>
@@ -1865,12 +2010,16 @@ export function buildHumanTimeline(
     const parentRowId = parentNodeId
       ? nodeRowById.get(parentNodeId) ?? MAIN_ROW_ID
       : undefined;
+    const parentView = parentNodeId ? laidOutNodeById.get(parentNodeId) : undefined;
 
     return {
       rowId,
       nodes: sortedRowNodes,
       firstNode,
       parentRowId,
+      parentLogicColumn: parentView?.logicColumn ?? 0,
+      parentStackIndex: parentView?.stackIndex ?? 0,
+      parentCreatedAt: parentView?.node.createdAt ?? "",
       firstCreatedAt: firstNode?.node.createdAt ?? ""
     };
   });
@@ -1879,7 +2028,7 @@ export function buildHumanTimeline(
 
   rowMeta.forEach((meta) => {
     if (
-      meta.rowId === MAIN_ROW_ID ||
+      isMainReasoningRow(meta.rowId) ||
       meta.rowId === MEMORY_ROW_ID ||
       meta.rowId === INACTIVE_ROW_ID
     ) {
@@ -1900,6 +2049,27 @@ export function buildHumanTimeline(
     children.sort((a, b) => {
       const aMeta = rowMetaById.get(a);
       const bMeta = rowMetaById.get(b);
+      const parentStackDelta =
+        (aMeta?.parentStackIndex ?? 0) - (bMeta?.parentStackIndex ?? 0);
+
+      if (parentStackDelta !== 0) {
+        return parentStackDelta;
+      }
+
+      const parentColumnDelta =
+        (aMeta?.parentLogicColumn ?? 0) - (bMeta?.parentLogicColumn ?? 0);
+
+      if (parentColumnDelta !== 0) {
+        return parentColumnDelta;
+      }
+
+      const parentTimeDelta =
+        new Date(aMeta?.parentCreatedAt ?? 0).getTime() -
+        new Date(bMeta?.parentCreatedAt ?? 0).getTime();
+
+      if (parentTimeDelta !== 0) {
+        return parentTimeDelta;
+      }
 
       return (
         new Date(aMeta?.firstCreatedAt ?? 0).getTime() -
@@ -1921,7 +2091,16 @@ export function buildHumanTimeline(
     (rowChildren.get(rowId) ?? []).forEach(pushRowWithChildren);
   };
 
-  pushRowWithChildren(MAIN_ROW_ID);
+  const mainRowIds = rowMeta
+    .filter((meta) => isMainReasoningRow(meta.rowId))
+    .sort(
+      (a, b) =>
+        new Date(a.firstCreatedAt).getTime() -
+        new Date(b.firstCreatedAt).getTime()
+    )
+    .map((meta) => meta.rowId);
+
+  mainRowIds.forEach(pushRowWithChildren);
 
   rowMeta
     .filter(
@@ -1945,7 +2124,28 @@ export function buildHumanTimeline(
     orderedRowIds.push(INACTIVE_ROW_ID);
   }
 
-  let branchRowIndex = 0;
+  const mainNumberByRowId = new Map<TimelineLaneId, number>();
+  mainRowIds.forEach((rowId, index) => {
+    mainNumberByRowId.set(rowId, index + 1);
+  });
+  const logicNumberByRowId = new Map<TimelineLaneId, string>();
+  const assignLogicNumbers = (rowId: TimelineLaneId, prefix: string) => {
+    (rowChildren.get(rowId) ?? []).forEach((childRowId, index) => {
+      const childNumber = `${prefix}.${index + 1}`;
+
+      logicNumberByRowId.set(childRowId, childNumber);
+      assignLogicNumbers(childRowId, childNumber);
+    });
+  };
+
+  mainRowIds.forEach((rowId) => {
+    const mainNumber = mainNumberByRowId.get(rowId);
+
+    if (mainNumber) {
+      assignLogicNumbers(rowId, `Q${mainNumber}`);
+    }
+  });
+  let fallbackBranchRowIndex = 0;
   const lanes: TimelineLane[] = orderedRowIds.map((rowId) => {
     const meta = rowMetaById.get(rowId);
     const firstNode = meta?.firstNode;
@@ -1959,12 +2159,18 @@ export function buildHumanTimeline(
         ? "Discarded"
         : "";
 
-    if (rowId === MAIN_ROW_ID) {
+    if (isMainReasoningRow(rowId)) {
+      const mainNumber = mainNumberByRowId.get(rowId);
+      const mainTopic =
+        firstNode?.shortTitle ||
+        (firstNode ? actionShortTitle("Q", firstNode.node.label) : "");
+
       return {
         id: rowId,
-        title: "Main Reasoning",
+        title: mainNumber ? `Main Q${mainNumber}` : "Main Reasoning",
         logicalDepth: 0,
-        description: "Accepted answers, document versions, and adopted changes."
+        description:
+          mainTopic || "Accepted answer, document version, and adopted changes."
       };
     }
 
@@ -1986,14 +2192,16 @@ export function buildHumanTimeline(
       };
     }
 
-    branchRowIndex += 1;
+    fallbackBranchRowIndex += 1;
     const focusLabel = firstNode?.logicFocusLabel;
+    const logicNumber =
+      logicNumberByRowId.get(rowId) ?? `L${fallbackBranchRowIndex}`;
     const baseTitle =
       focusLabel
-        ? `Logic ${branchRowIndex}: ${focusLabel}`
+        ? `${logicNumber}: ${focusLabel}`
         : depth > 1
-          ? `Nested Logic ${branchRowIndex}`
-          : `Logic ${branchRowIndex}`;
+          ? `${logicNumber}: nested follow-up`
+          : `${logicNumber}: local logic`;
 
     return {
       id: rowId,

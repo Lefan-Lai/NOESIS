@@ -10016,3 +10016,469 @@ context_snapshot_effect = none
 ```
 
 This is a UI-only display preference inside the main answer panel. It does not mark messages active, inactive, discarded, deleted, restored, or removed. It also does not change EventLog records, TimelineNode records, ContextSnapshot generation, or future LLM memory inclusion.
+
+## 2026-07-06 - Source locator for answer cards, local windows, and logic nodes
+
+### User-facing issue
+
+Older assistant answers were selectable, but they still did not feel like first-class answer objects. They also did not clearly show whether local threads had already been created from them. After opening a local window from a selected passage, it was easy to lose the connection between:
+
+```text
+main assistant answer
+selected source text
+local thread
+logic map node
+```
+
+The user needed a way to get back to the original answer and reopen related local windows.
+
+### Change
+
+Added a shared source-locator utility:
+
+```text
+conversationMessageIdFromSource
+focusMainMessageBySource
+focusMainSelectionByAnchor
+requestSourceFocus
+```
+
+`requestSourceFocus` emits a local UI event. The main answer panel listens for that event, switches to the correct message filter when necessary, then scrolls and flashes the relevant answer card or selection chip.
+
+### Main answer cards
+
+Every assistant card now shows clearer identity metadata:
+
+```text
+Assistant
+Active / Earlier / Historical / Discarded / Deleted
+Local N, when local threads exist for that answer
+Model badge, using message model or window fallback
+```
+
+If an answer has related local threads, the card also renders `Source locals` chips. Clicking a chip:
+
+```text
+opens the related local thread
+requests source focus
+scrolls back to the source answer card / source anchor chip
+flashes the source marker
+```
+
+### Local window source navigation
+
+The local window header now has a `Go to Source` button beside the selected-text header. It uses the active local thread's source selection and source message id, then asks the main answer panel to locate the original source.
+
+This works even when the source answer is hidden by the current main-chat filter, because the main panel switches to the matching visibility filter first:
+
+```text
+active source -> Active view
+inactive source -> Inactive view
+discarded/deleted source -> Removed view
+```
+
+### Logic map source navigation
+
+The logic-map node menu now labels the navigation action as:
+
+```text
+Open / Locate Source
+```
+
+When a node has a related local thread, it opens that thread. When a node has a source anchor or source message, it also requests source focus in the main answer panel. For answer nodes that do not have a local thread, the node id is used to infer the corresponding assistant source message when possible.
+
+### Visual feedback
+
+The source locator adds a temporary pulse highlight:
+
+```text
+data-source-locator-focus = true
+```
+
+This makes the source answer or source anchor chip visible after scrolling, so the user can see where the local thread came from.
+
+### Memory and timeline effect
+
+```text
+memory_scope = none
+memory_effect = none
+timeline_effect = none
+storage_effect = none
+context_snapshot_effect = none
+```
+
+This is a navigation and visibility improvement only. It does not create new selections, local threads, EventLog records, TimelineNode records, TimelineEdge records, ContextSnapshot records, or LLM memory entries. It only makes already-recorded relationships easier to find again.
+
+## Semantic Map Window Recovery and Main-Only Initial Workspace
+
+### User-facing goal
+
+The workspace should not open every analysis panel by default. A new project/session should begin with the Main Answer Window as the only main work surface. Local windows, revision branch windows, and Semantic Difference Map windows should appear only after the user opens or generates them.
+
+The user also needed a way to reopen old Semantic Difference Maps after returning to previous answers, source selections, local threads, or logic-map nodes.
+
+### Layout behavior
+
+`AppShell` now treats the right analysis panel as conditional:
+
+```text
+right panel visible =
+  activeRevisionBranchId exists
+  OR activeTreeWindowId exists
+```
+
+If neither exists, the main answer panel expands across the available top workspace. If a local thread or Semantic Difference Map is opened later, the grid recalculates so the active panels share the top workspace.
+
+### Semantic Map open / close logic
+
+The store now exposes:
+
+```text
+openComparisonWindow(comparisonId)
+closeComparisonWindow()
+```
+
+`openComparisonWindow`:
+
+```text
+1. Finds the saved comparison by id.
+2. Refuses to open deleted comparisons.
+3. Reuses or creates the matching tree_compare window.
+4. Reuses or creates the matching tree_chat session.
+5. Sets activeTreeWindowId to that window id.
+```
+
+`closeComparisonWindow` only hides the current map window:
+
+```text
+activeTreeWindowId = null
+isComparisonExpanded = false
+```
+
+It does not clear, discard, delete, supersede, or mutate the comparison graph. The comparison remains recoverable from its source answer, local thread, or logic-map node.
+
+### Reopen entry points
+
+Main assistant answer cards now show:
+
+```text
+Map N
+Semantic maps
+```
+
+when saved Semantic Difference Maps exist for selections inside that answer. Clicking a map chip opens the saved map in the right panel.
+
+Local windows now show:
+
+```text
+Map N
+```
+
+beside `Go to Source` when the selected local anchor has one or more saved maps.
+
+Logic-map node menus now use:
+
+```text
+Open Related Window
+```
+
+When the node has a related local thread, it opens the local thread. When the node has a source anchor with a saved Semantic Difference Map, it also opens the related map. It still requests source focus in the main answer panel so the user can see where the logic point came from.
+
+### Semantic Map panel
+
+The Semantic Difference Map panel now has a close button. Closing the panel is a UI operation only:
+
+```text
+storage_effect = none
+memory_effect = none
+timeline_effect = none
+context_snapshot_effect = none
+```
+
+Clear and Delete remain separate menu actions with their existing action contracts.
+
+### Memory / persistence rule
+
+This change does not create new memory. It only makes previously persisted comparison data visible again.
+
+```text
+open map:
+  memory_scope = none
+  memory_effect = none
+  event_log_effect = none
+
+close map:
+  memory_scope = none
+  memory_effect = none
+  event_log_effect = none
+
+clear map:
+  handled by comparison.clear action
+
+delete map:
+  handled by object.delete action
+```
+
+Deleted comparison maps still cannot be reopened and must never enter future LLM context.
+
+## 2026-07-07 - Revision Logic Map source-anchor collapse and source-owned local branches
+
+### User-facing issue
+
+The Revision Logic Map was still too close to a raw event timeline. It showed `Source:` as a visible node and then connected it to an `Answer:` node whose text was actually the user's local question. This created two problems:
+
+```text
+1. The visual node name was semantically wrong.
+   "CHI呢" is a question, not an answer.
+
+2. The source selection was treated as a separate reasoning step.
+   A selected source passage should explain where a local question came from,
+   but it should not become its own main visible logic node.
+```
+
+The map also placed branches mainly by creation time. When the user asked later main questions and then returned to an earlier answer to ask a local question, the local branch could visually drift toward the latest lower layer, causing crossing and overlapping lines.
+
+### New visual rule
+
+The logic map now treats a selected source as metadata for the local question node:
+
+```text
+Main Q
+  -> Local Q
+       details:
+         source selected text
+         assistant reply
+```
+
+The visible map should no longer show:
+
+```text
+Main Q -> Source -> Answer: <user question>
+```
+
+Instead it should show:
+
+```text
+Main Q -> Q: <user local question>
+```
+
+The selected source passage is still available in the hover/detail content.
+
+### Source node behavior
+
+`anchor_selected` version nodes are no longer emitted as visible `HumanTimelineNode` items.
+
+Important: this does not delete or discard any data.
+
+```text
+storage_effect = none
+event_log_effect = none
+timeline_record_effect = none
+memory_effect = none
+```
+
+The underlying selection / anchor records remain available for:
+
+```text
+source lookup
+local thread recovery
+context review
+comparison map recovery
+go-to-source navigation
+memory scoping
+```
+
+Only the map rendering collapses them out of the main visual path.
+
+### Local question node behavior
+
+The current store records each completed local exchange as a `local_answer_generated` version node. Because that node represents the user's local question plus the assistant reply, the map now labels it as a local question:
+
+```text
+shortTitle = Q: <local question>
+title = Question: <local question>
+relationLabel = local question
+```
+
+The hover/detail subtitle includes:
+
+```text
+Question: <user local question>
+Source: <selected source passage>
+Reply: <assistant local answer>
+```
+
+This keeps the map readable while preserving the answer content in the node details.
+
+### Parent assignment rule
+
+Local branches now choose their visual parent by source ownership before time:
+
+```text
+1. If the selection has sourceMessageId, map it to the corresponding main/local answer node.
+2. If the selection is nested inside a local thread, map it to the parent local answer node when possible.
+3. If source lookup fails, fall back to the latest main answer before the selection.
+4. Only use raw parentId as a final fallback.
+```
+
+This means:
+
+```text
+If the user asks a later main question,
+then goes back and asks about an earlier answer,
+the local branch stays under the earlier answer.
+```
+
+Time still orders siblings within the same source-owned branch, but time no longer decides which main answer owns the branch.
+
+### Layout rule
+
+Branch rows are now sorted by their source parent before their creation time:
+
+```text
+parent stack index
+parent logic column
+parent created time
+branch created time
+```
+
+This keeps local rows visually near the main question/answer they came from and reduces lines crossing over unrelated main questions.
+
+### Color rule
+
+Because the visible local node is now a question node, `local_answer_generated` uses the local-question visual tone:
+
+```text
+green = local question / local check
+purple = draft / merge idea / generated revision
+```
+
+The left legend was updated from:
+
+```text
+C logic focus
+S suggest / draft
+```
+
+to:
+
+```text
+Q local question
+D draft / merge idea
+```
+
+### Memory and context effect
+
+This is a visualization and interpretation change only. It does not change which objects enter future LLM context.
+
+```text
+selected text:
+  still exists as source/anchor memory metadata
+
+local question:
+  still scoped to its local thread / selected text
+
+assistant local reply:
+  still stored in local thread messages
+
+main context:
+  still excludes unmerged local branches by default
+
+deleted/discarded objects:
+  still follow their existing exclusion rules
+```
+
+No EventLog records, TimelineNode records, TimelineEdge records, ContextSnapshot records, LLMCallRecord records, messages, selections, or annotations are deleted by this change.
+
+## 2026-07-07 - Main-scoped logic rows and selection toolbar cleanup
+
+### Selection toolbar behavior
+
+The text-selection action toolbar is now treated as transient UI state:
+
+```text
+click blank space -> hide toolbar
+click another message/window -> hide toolbar
+start a new text selection -> clear old toolbar, then show the new toolbar on mouseup
+click a toolbar button -> keep it alive long enough to run the action, then hide it
+browser selection collapses -> hide toolbar
+```
+
+This does not create, delete, discard, or mutate any persistent workspace memory by itself. Persistent records are still created only after the user chooses an action such as opening a local window or saving a note.
+
+### Main-scoped Logic Map rows
+
+The Logic Map no longer places every local branch under one global main row. Main reasoning is now split into source-owned main reasoning units.
+
+```text
+Main Q1
+  Q1.1 local logic
+  Q1.2 local logic
+
+Main Q2
+  Q2.1 local logic
+```
+
+If a local branch was created from a selected passage inside a specific main answer, its row is scoped to that main reasoning unit and rendered between that main unit and the next main unit. This prevents branches from an earlier answer from being pushed to the bottom of the whole map after later main questions are asked.
+
+### Logic numbering rule
+
+Global `Logic 1`, `Logic 2`, `Logic 3` labels are replaced by source-scoped numbering:
+
+```text
+Main Q1 -> Q1.1, Q1.2, Q1.3
+Main Q2 -> Q2.1, Q2.2
+nested local rows -> Q1.1.1, Q1.1.2
+```
+
+Fallback rows that cannot be traced to a main reasoning unit still render with an `L#` label so legacy or incomplete data remains visible instead of being dropped.
+
+### Memory and persistence effect
+
+This change is visual/layout only:
+
+```text
+messages: unchanged
+text selections: unchanged
+local threads: unchanged
+annotations: unchanged
+document versions: unchanged
+event log: unchanged
+timeline data: unchanged
+context inclusion/exclusion rules: unchanged
+```
+
+No history or memory is deleted. The layout uses existing source ownership metadata to decide where each local branch belongs.
+
+## 2026-07-07 - Semantic Difference Map vertical Layer 2 / Layer 3 layout
+
+### User-facing change
+
+The Semantic Difference Map no longer places Layer 2 and Layer 3 side by side on wide screens.
+
+```text
+Before:
+Layer 2 Difference Lens | Layer 3 Difference Inspector
+
+After:
+Layer 2 Difference Lens
+Layer 3 Difference Inspector
+```
+
+The short explanatory sentence under the Layer 2 title was removed so the panel starts directly with the filter controls and the visible difference rows.
+
+### Memory and persistence effect
+
+This is a presentation-only change:
+
+```text
+comparison graph data: unchanged
+comparison runs: unchanged
+semantic rows: unchanged
+context snapshots: unchanged
+event log: unchanged
+timeline data: unchanged
+LLM memory rules: unchanged
+```
+
+No comparison records, local threads, selections, messages, annotations, or document versions are deleted.
