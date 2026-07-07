@@ -271,6 +271,7 @@ function getNodeSuffix(nodeId: string) {
   const prefixes = [
     "v-created-",
     "v-main-answer-",
+    "v-local-question-",
     "v-local-answer-",
     "v-selection-",
     "v-local-selection-",

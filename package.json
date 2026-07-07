@@ -5,6 +5,7 @@
   "packageManager": "pnpm@11.7.0",
   "scripts": {
     "dev": "next dev",
+    "dev:clean": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-dev-clean.ps1 -Foreground",
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",

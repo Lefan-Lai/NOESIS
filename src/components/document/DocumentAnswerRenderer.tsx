@@ -1,13 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import {
-  GitBranchPlus,
-  GitMerge,
-  MessageSquare,
-  PencilLine,
-  StickyNote
-} from "lucide-react";
+import { MessageSquare, StickyNote } from "lucide-react";
 import { MarkdownText } from "@/components/MarkdownText";
 import { useAnswerAtlasStore } from "@/store/useAnswerAtlasStore";
 import {
@@ -129,10 +123,7 @@ export function DocumentAnswerRenderer({
   source,
   toolbarMode = "main_answer",
   onAskAboutThis,
-  onReviseThis,
-  onCreateBranch,
-  onAddNote,
-  onMergeSelection
+  onAddNote
 }: DocumentAnswerRendererProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -285,79 +276,30 @@ export function DocumentAnswerRenderer({
         >
           <button
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() =>
-              run(toolbarMode === "local_answer" ? onReviseThis : onAskAboutThis)
-            }
+            onClick={() => run(onAskAboutThis)}
             className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-700 hover:bg-blue-50 hover:text-atlasBlue"
+            title={
+              toolbarMode === "local_answer"
+                ? "Ask a nested local question about this selected fragment."
+                : "Ask a local question about this selected passage."
+            }
           >
-            {toolbarMode === "local_answer" ? (
-              <PencilLine size={14} />
-            ) : (
-              <MessageSquare size={14} />
-            )}
-            {toolbarMode === "local_answer" ? "Revise" : "Ask Locally"}
+            <MessageSquare size={14} />
+            Ask Locally
           </button>
           <button
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() =>
-              run(toolbarMode === "local_answer" ? onCreateBranch : onReviseThis)
+            onClick={() => run(onAddNote)}
+            className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-700 hover:bg-amber-50 hover:text-amber-700"
+            title={
+              toolbarMode === "local_answer"
+                ? "Keep this selected local fragment as a scoped note."
+                : "Add a context note for this selected passage."
             }
-            className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-700 hover:bg-blue-50 hover:text-atlasBlue"
           >
-            {toolbarMode === "local_answer" ? (
-              <GitBranchPlus size={14} />
-            ) : (
-              <PencilLine size={14} />
-            )}
-            {toolbarMode === "local_answer" ? "Branch" : "Open Local Window"}
+            <StickyNote size={14} />
+            Note
           </button>
-          {toolbarMode === "main_answer" && (
-            <>
-              <button
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => run(onCreateBranch)}
-                disabled
-                className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-400"
-                title="Branch editing starts from local answer selections in Phase 3."
-              >
-                <GitBranchPlus size={14} />
-                Branch
-              </button>
-              <button
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => run(onAddNote)}
-                className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-700 hover:bg-amber-50 hover:text-amber-700"
-                title="Add context note for this selection."
-              >
-                <StickyNote size={14} />
-                Note
-              </button>
-            </>
-          )}
-          {toolbarMode === "local_answer" && (
-            <>
-              {onMergeSelection && (
-                <button
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => run(onMergeSelection)}
-                  className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-700 hover:bg-purple-50 hover:text-atlasPurple"
-                  title="Create a merge proposal for this selected fragment."
-                >
-                  <GitMerge size={14} />
-                  Merge
-                </button>
-              )}
-              <button
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => run(onAddNote)}
-                className="flex h-8 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-700 hover:bg-amber-50 hover:text-amber-700"
-                title="Keep selected fragment as scoped context note."
-              >
-                <StickyNote size={14} />
-                Keep Note
-              </button>
-            </>
-          )}
         </div>
       )}
     </>

@@ -10482,3 +10482,681 @@ LLM memory rules: unchanged
 ```
 
 No comparison records, local threads, selections, messages, annotations, or document versions are deleted.
+
+## 2026-07-07 - Clean dev server launcher for duplicate PATH / Path environments
+
+### Problem
+
+The Windows process environment in the Codex shell can contain both:
+
+```text
+PATH
+Path
+```
+
+PowerShell commands such as `Start-Process` and `Get-ChildItem Env:` treat environment keys case-insensitively, so the duplicate key causes:
+
+```text
+Item has already been added. Key in dictionary: 'PATH' Key being added: 'Path'
+```
+
+This made repeated dev-server startup unreliable.
+
+### Change
+
+Added:
+
+```text
+scripts/start-dev-clean.ps1
+```
+
+and package script:
+
+```text
+npm run dev:clean
+```
+
+The launcher reads the raw process environment through .NET, merges all `PATH` / `Path` entries into one canonical `Path`, removes duplicate path segments, and then starts the local Next.js CLI with that clean environment.
+
+It runs Next directly through Node:
+
+```text
+node node_modules/next/dist/bin/next dev -p 3000
+```
+
+This avoids both:
+
+```text
+PowerShell Start-Process duplicate PATH failure
+pnpm temporary-file permission checks during dev startup
+```
+
+### Startup modes
+
+Default:
+
+```text
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-dev-clean.ps1
+```
+
+Starts the server in background mode.
+
+Foreground:
+
+```text
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-dev-clean.ps1 -Foreground
+```
+
+Runs the server in the current terminal so startup errors are visible.
+
+Package script:
+
+```text
+npm run dev:clean
+```
+
+Runs the clean launcher in foreground mode for normal terminal use. In the Codex sandbox, the direct PowerShell command is preferred because `pnpm` itself can be blocked by temporary-file permission checks before it reaches the package script.
+
+### Memory and persistence effect
+
+This is a local developer-environment startup fix only:
+
+```text
+application data: unchanged
+database records: unchanged
+messages: unchanged
+timeline nodes: unchanged
+context snapshots: unchanged
+LLM memory: unchanged
+```
+
+No project data, workspace memory, messages, selections, local threads, annotations, comparison graphs, or document versions are deleted.
+
+## 2026-07-07 - Recursive Local Selection Entry and Parent/Child Local Window Chain
+
+### User-facing requirement
+
+The floating toolbar shown after selecting text should be simple and consistent:
+
+```text
+Ask Locally
+Note
+```
+
+This applies to both:
+
+```text
+main answer selections
+local answer selections
+```
+
+Selecting text inside a local answer and clicking `Ask Locally` should start a recursive local question flow:
+
+```text
+parent local window
+→ selected fragment inside parent local answer
+→ child local window
+→ child local answer
+→ semantic difference map for parent fragment vs child answer
+```
+
+### UI changes
+
+Updated:
+
+```text
+src/components/document/DocumentAnswerRenderer.tsx
+```
+
+The selection toolbar now renders only:
+
+```text
+Ask Locally
+Note
+```
+
+Removed from the floating selection toolbar:
+
+```text
+Open Local Window
+Branch
+Revise
+Merge
+Keep Note
+```
+
+These actions were not deleted from the application. They are only removed from the small text-selection toolbar so the selection interaction has one clear meaning.
+
+Updated:
+
+```text
+src/components/thread/SideThreadPanel.tsx
+src/components/layout/AppShell.tsx
+```
+
+`SideThreadPanel` can now render a specific thread by id. When the active local thread has a parent thread, the layout shows:
+
+```text
+Main Answer Window
+Parent Local Window
+Active Child Local Window
+Semantic Difference Map, if open
+```
+
+The parent local window is shown as source context. It does not expose the active send/minimize/close/action bar controls for the current child question. The active child local window remains the place where the user continues asking.
+
+### Persistence and memory logic
+
+No new persistence model was introduced in this change. The recursive flow continues to use the existing durable services:
+
+```text
+LocalSelectionService
+LocalThreadService.getOrCreateNestedLocalThreadForLocalSelection
+EventLog
+TimelineNode
+TimelineEdge
+ContextSnapshot
+LLMCallRecord
+ComparisonGraph
+```
+
+When a user selects text in a local answer and clicks `Ask Locally`, the existing `openSelectionBranch(..., "ask")` path creates or reuses:
+
+```text
+LocalSelection
+Nested LocalThread
+selection/local-thread events
+timeline nodes and edges
+```
+
+When the user asks inside that child local thread, the existing `askLocalQuestion` flow still creates:
+
+```text
+local user message
+local assistant message
+LLMCallRecord
+ContextSnapshot
+comparison graph for selected fragment vs local answer
+timeline/event records
+```
+
+### Memory-scope effect
+
+The toolbar simplification does not change memory policy:
+
+```text
+main answer selection -> selected_text / local_thread scope
+local answer selection -> local_selection / nested_local_thread scope
+note -> scoped annotation memory
+child local answer -> local thread memory only
+semantic map -> comparison memory only
+```
+
+Nested local answers still do not automatically enter main conversation memory or document memory. They affect future context only through the existing explicit channels:
+
+```text
+scoped notes
+confirmed merge
+active local thread context
+active comparison panel context
+```
+
+### Verification
+
+Ran:
+
+```text
+node node_modules/typescript/bin/tsc --noEmit
+```
+
+Result:
+
+```text
+passed
+```
+
+## 2026-07-07 - Workspace Tree Button Reposition
+
+### User request
+
+The button that opened the thread/project navigator was visually mixed into the right-side utility icons. The user wanted it moved to the left of the search box and wanted the icon to better match the panel content.
+
+### Change
+
+Updated:
+
+```text
+src/components/layout/AppHeader.tsx
+```
+
+Behavior:
+
+```text
+The workspace navigation button now appears directly to the left of Search.
+The icon changed from a chat-style icon to FolderTree.
+The tooltip/aria label now reads Workspace Tree.
+The button still opens the same workspace/navigation panel.
+```
+
+### Memory effect
+
+No data or memory behavior changed.
+
+This is a navigation-only UI change. It does not affect projects, threads, local memory, context snapshots, timeline nodes, or LLM context construction.
+
+### Verification
+
+Ran:
+
+```text
+node node_modules/typescript/bin/tsc --noEmit
+```
+
+Result:
+
+```text
+passed
+```
+
+### Follow-up adjustment
+
+The Workspace Tree button now sits inside the left project control group:
+
+```text
+NOESIS
+Project selector
+Rename Project
+New Project
+Workspace Tree
+Search
+```
+
+This keeps Workspace Tree visually attached to project/workspace controls rather than attached to Search.
+
+Verification:
+
+```text
+node node_modules/typescript/bin/tsc --noEmit
+passed
+```
+
+## 2026-07-07 - Header Project Naming and Logic Map Label Cleanup
+
+### User request
+
+The header needed three visual/behavior fixes:
+
+```text
+Remove the subtitle beside NOESIS.
+Move the Project selector left and make it wider.
+Rename Revision Logic Map to Logic Map.
+```
+
+The project workflow also needed to stop accumulating confusing empty projects such as `Project 2`, and project renaming needed to be easier to discover.
+
+### Change
+
+Updated:
+
+```text
+src/components/layout/AppHeader.tsx
+src/store/useAnswerAtlasStore.ts
+src/components/timeline/VersionTimeline.tsx
+src/lib/projectDisplay.ts
+```
+
+Added shared project display helpers for:
+
+```text
+temporary project name detection
+empty project detection
+project title generation from the first user prompt
+optional title replacement from the generated answer title
+```
+
+Header behavior:
+
+```text
+NOESIS is now the only brand text in the header.
+The Project selector is the first control beside NOESIS.
+The Project selector is wider.
+A visible Rename Project pencil button sits beside the selector.
+The New Project button sits beside Rename Project.
+Empty non-current projects are hidden from the selector.
+```
+
+Project behavior:
+
+```text
+If the current project is empty and New Project is clicked, the empty project is reused instead of creating another empty project.
+If the current project has content, New Project creates a new empty Untitled Project.
+When the first main question is sent in a temporary-named project, the project name is immediately derived from the prompt.
+When the model response returns a useful generated title, the project name can be refined from that title.
+Manually renamed projects are not auto-overwritten because auto-naming only applies to temporary names.
+```
+
+Logic Map naming:
+
+```text
+Collapsed map title: Logic Map
+Expanded map title: Logic Map
+Fullscreen map title: Logic Map
+```
+
+### Memory effect
+
+No project data is deleted.
+
+Empty projects are hidden from the header selector and reused during creation, but existing persisted project records are not removed.
+
+Auto-generated project names are display metadata only. They do not change message memory, context snapshots, timeline nodes, or LLM context inclusion rules.
+
+### Verification
+
+Ran:
+
+```text
+node node_modules/typescript/bin/tsc --noEmit
+```
+
+Result:
+
+```text
+passed
+```
+
+## 2026-07-07 - Local Questions Become Logic Map Nodes and Local Thread Tabs Become a Tree
+
+### Problem
+
+Local context recursion had two usability/data-visibility issues:
+
+```text
+1. Selecting text inside a local answer and asking a follow-up did not reliably appear as its own logic step in the Logic Map.
+2. The horizontal local-thread tabs became hard to read and did not clearly show parent/child relationships.
+```
+
+The first issue happened because the visible Logic Map used UI `VersionNode` records, and the local send flow only added a `local_answer_generated` node. It did not add a visible `local_question_asked` node for the user's local question.
+
+### Logic Map change
+
+Updated:
+
+```text
+src/store/useAnswerAtlasStore.ts
+src/components/timeline/timelineHumanize.ts
+```
+
+Each local send now creates two visible UI version nodes:
+
+```text
+v-local-question-*   nodeType = local_question_asked
+v-local-answer-*     nodeType = local_answer_generated
+```
+
+The answer node is parented to the question node:
+
+```text
+selected source / parent local answer
+→ local question
+→ local answer
+```
+
+For nested local questions, the source anchor still points back to the selected local answer, so the Logic Map can show:
+
+```text
+parent local answer
+→ nested local question
+→ nested local answer
+```
+
+`timelineHumanize` now recognizes the `v-local-question-*` id prefix, so question nodes can resolve their user-message text and display meaningful short labels.
+
+### Thread tree change
+
+Updated:
+
+```text
+src/components/thread/SideThreadPanel.tsx
+```
+
+The horizontal `Thread stack` tabs were replaced with a compact `Local thread tree`.
+
+The tree:
+
+```text
+shows parent/child nesting by indentation
+highlights the current local thread
+uses the first local question or selected text as the node label
+shows message count for persisted threads
+shows a draft marker for the current empty local thread
+shows a Map button when the thread has a Semantic Difference Map
+```
+
+### Empty draft rule
+
+No objects are deleted.
+
+The UI rule is:
+
+```text
+current empty local thread -> shown as draft
+empty local thread after switching away -> hidden from the tree
+thread with at least one message -> retained in the tree
+discarded/deleted status -> still shown only when relevant and styled through status text
+```
+
+This satisfies the interaction expectation without performing data deletion.
+
+### Semantic map behavior
+
+Clicking a tree item:
+
+```text
+opens that local thread
+opens its related Semantic Difference Map if present
+closes the stale map if that thread has no map
+```
+
+### Memory effect
+
+The new visual tree does not promote local content into main memory.
+
+Memory/context still follows existing rules:
+
+```text
+local question/answer -> local_thread or nested_local_thread scope
+empty draft -> not included in future context as a persisted reasoning item
+deleted memory -> never included
+discarded memory -> excluded by default
+notes/merges -> explicit promotion channels only
+```
+
+### Verification
+
+Ran:
+
+```text
+node node_modules/typescript/bin/tsc --noEmit
+```
+
+Result:
+
+```text
+passed
+```
+
+## 2026-07-07 - Local Thread Stack Tabs Replace Side-by-Side Recursive Windows
+
+### Problem
+
+Recursive local windows were previously rendered side by side:
+
+```text
+Main Answer Window | Parent Local Window | Active Child Local Window | Semantic Difference Map
+```
+
+This made each local window narrower as the user drilled into nested local questions. Long titles, model selectors, and status labels could overflow or wrap poorly.
+
+### Change
+
+Updated:
+
+```text
+src/components/layout/AppShell.tsx
+src/components/thread/SideThreadPanel.tsx
+```
+
+The main layout now keeps a stable maximum of:
+
+```text
+Main Answer Window | Active Local Window | Semantic Difference Map
+```
+
+Nested local history is shown inside the active local window as a horizontal `Thread stack` tab strip.
+
+Each tab represents one local reasoning step:
+
+```text
+Root
+Parent
+Current
+Follow-up
+```
+
+The tab label uses a compact summary from the first user question or the selected text. Full text is available through the browser tooltip.
+
+### Interaction
+
+Clicking a thread-stack tab:
+
+```text
+opens that local thread
+sets it as the active local window
+updates the selected anchor
+opens that thread's semantic map if one exists
+closes the stale semantic map if no map exists for the selected thread
+```
+
+This prevents the right-side Semantic Difference Map from showing an old comparison after the user switches local-thread context.
+
+### Layout rule
+
+The UI no longer creates one visible column per recursion level. Recursion is represented as navigable tabs, not as an ever-growing row of panels.
+
+This preserves the persistent data model:
+
+```text
+LocalSelection
+Nested LocalThread
+ContextSnapshot
+LLMCallRecord
+ComparisonGraph
+EventLog
+TimelineNode / TimelineEdge
+```
+
+Only the visible layout changed.
+
+### Memory effect
+
+No memory rule changed.
+
+Switching tabs changes the active local thread in the UI. It does not delete, discard, merge, or promote any local content. Future local LLM context is still built from the active local thread and its scoped selection/memory rules.
+
+### Verification
+
+Ran:
+
+```text
+node node_modules/typescript/bin/tsc --noEmit
+```
+
+Result:
+
+```text
+passed
+```
+
+## 2026-07-07 - Revision Suggestion Text Uses the Same Local Selection Toolbar
+
+### Problem
+
+The user selected text inside the `Revision Suggestion` panel, but the floating selection toolbar did not appear.
+
+Root cause:
+
+```text
+LLM Answer cards used DocumentAnswerRenderer.
+Revision Suggestion was rendered as plain text.
+```
+
+Only `DocumentAnswerRenderer` owns the browser text-selection listener that opens:
+
+```text
+Ask Locally
+Note
+```
+
+Therefore selecting text in the suggestion block could highlight browser text but could not create a local/nested selection action.
+
+### Change
+
+Updated:
+
+```text
+src/components/thread/SideThreadPanel.tsx
+```
+
+`Revision Suggestion` now renders through `DocumentAnswerRenderer` when a local assistant answer exists.
+
+The source metadata is attached to the latest local assistant message:
+
+```text
+sourceType = message
+sourceId = latest local assistant revision message id
+sourceLocalThreadId = current local thread revision id
+parentSelectionId = current thread source selection
+parentLocalSelectionId = current thread source local selection, if any
+sourceThreadType = local or nested_local
+```
+
+### Behavior
+
+Selecting text inside `Revision Suggestion` now shows:
+
+```text
+Ask Locally
+Note
+```
+
+`Ask Locally` continues through the existing nested local flow:
+
+```text
+LocalSelection
+Nested LocalThread
+ContextSnapshot
+LLMCallRecord
+Timeline/Event records
+Semantic Difference Map
+```
+
+### Memory effect
+
+No new global memory path is introduced.
+
+Revision suggestion selections are scoped to the current local/nested local thread and only affect future LLM context through the existing explicit local-thread/note/merge rules.
+
+### Verification
+
+Ran:
+
+```text
+node node_modules/typescript/bin/tsc --noEmit
+```
+
+Result:
+
+```text
+passed
+```

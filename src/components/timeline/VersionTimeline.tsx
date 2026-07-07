@@ -952,7 +952,7 @@ export function VersionTimeline({
         <div className="flex min-w-0 flex-1 items-center justify-between gap-3 px-4">
           <div className="min-w-0">
             <h2 className="truncate text-sm font-bold text-ink">
-              Revision Logic Map
+              Logic Map
             </h2>
             <p className="truncate text-xs text-muted">
               Minimized. Logic records, memory, and timeline data are unchanged.
@@ -1001,7 +1001,7 @@ export function VersionTimeline({
         />
         <div className="relative min-w-0 flex-1">
           <div className="flex h-12 items-center justify-between border-b border-line px-4">
-            <h2 className="text-lg font-bold text-ink">Revision Logic Map</h2>
+            <h2 className="text-lg font-bold text-ink">Logic Map</h2>
             <div className="flex items-center gap-2">
               {logicControlToggle}
               {zoomControls}
@@ -1039,7 +1039,7 @@ export function VersionTimeline({
         <div className="fixed inset-0 z-40 flex flex-col bg-white">
           <div className="flex h-14 shrink-0 items-center justify-between border-b border-line px-5">
             <div>
-              <h2 className="text-lg font-bold text-ink">Revision Logic Map</h2>
+              <h2 className="text-lg font-bold text-ink">Logic Map</h2>
               <p className="text-xs text-muted">
                 Compact graph with hover details. Independent local questions form separate logic rows.
               </p>

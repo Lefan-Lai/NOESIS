@@ -15,18 +15,37 @@ import {
   UserRound
 } from "lucide-react";
 import { useAnswerAtlasStore } from "@/store/useAnswerAtlasStore";
+import { DocumentAnswerRenderer } from "@/components/document/DocumentAnswerRenderer";
 import { ThreadMessageCard } from "./ThreadMessageCard";
 import { ThreadActionBar } from "./ThreadActionBar";
 import { DeleteAnswerDialog } from "./DeleteAnswerDialog";
 import type { TextSelectionDraft } from "@/components/document/DocumentAnswerRenderer";
-import type { ThreadMessage } from "@/types/thread";
+import type { LocalThread, ThreadMessage } from "@/types/thread";
 import { requestSourceFocus } from "@/lib/navigation/sourceLocator";
 
 function getAnchorDisplayLabel(blockId?: string) {
   return blockId ? blockId.toUpperCase() : "-";
 }
 
-export function SideThreadPanel() {
+function compactLabel(value?: string, fallback = "Local thread") {
+  const normalized = value?.replace(/\s+/g, " ").trim();
+
+  if (!normalized) {
+    return fallback;
+  }
+
+  return normalized.length > 34 ? `${normalized.slice(0, 34)}...` : normalized;
+}
+
+type SideThreadPanelProps = {
+  threadId?: string;
+  chainRole?: "active" | "parent" | "child";
+};
+
+export function SideThreadPanel({
+  threadId,
+  chainRole = "active"
+}: SideThreadPanelProps = {}) {
   const [question, setQuestion] = useState("");
   const [annotationText, setAnnotationText] = useState("");
   const [contextNotesOpen, setContextNotesOpen] = useState(false);
@@ -83,36 +102,52 @@ export function SideThreadPanel() {
   const openComparisonWindow = useAnswerAtlasStore(
     (state) => state.openComparisonWindow
   );
+  const closeComparisonWindow = useAnswerAtlasStore(
+    (state) => state.closeComparisonWindow
+  );
+  const openThread = useAnswerAtlasStore((state) => state.openThread);
 
-  const anchor = selectedAnchorId ? anchors[selectedAnchorId] : null;
+  const effectiveThreadId = threadId ?? selectedThreadId;
+  const isActivePanel = Boolean(
+    effectiveThreadId && effectiveThreadId === selectedThreadId && chainRole !== "parent"
+  );
+  const thread = effectiveThreadId ? threads[effectiveThreadId] : null;
+  const effectiveAnchorId = thread?.anchorId ?? selectedAnchorId;
+  const anchor = effectiveAnchorId ? anchors[effectiveAnchorId] : null;
   const block = anchor?.blockId ? blocks[anchor.blockId] : null;
   const selectedText = anchor?.selectedText ?? block?.text ?? "";
-  const thread = selectedThreadId ? threads[selectedThreadId] : null;
   const branchWindow = thread ? windows[`window-${thread.id}`] : null;
   const threadMessages = useMemo(
     () =>
       Object.values(messages)
-        .filter((message) => message.threadId === selectedThreadId)
+        .filter((message) => message.threadId === effectiveThreadId)
         .filter((message) => message.contentState !== "deleted")
         .sort(
           (a, b) =>
             new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
         ),
-    [messages, selectedThreadId]
+    [messages, effectiveThreadId]
+  );
+  const latestAssistantMessage = useMemo(
+    () =>
+      [...threadMessages]
+        .reverse()
+        .find((message) => message.role === "assistant"),
+    [threadMessages]
   );
   const anchorAnnotations = useMemo(
     () =>
       Object.values(annotations)
         .filter(
           (annotation) =>
-            annotation.anchorId === selectedAnchorId &&
+            annotation.anchorId === effectiveAnchorId &&
             annotation.status !== "deleted"
         )
         .sort(
           (a, b) =>
             new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
         ),
-    [annotations, selectedAnchorId]
+    [annotations, effectiveAnchorId]
   );
   const relatedRevisionNotes = useMemo(() => {
     if (!thread) {
@@ -165,22 +200,173 @@ export function SideThreadPanel() {
         .filter(
           (comparison) =>
             comparison.status !== "deleted" &&
-            comparison.anchorId === selectedAnchorId
+            comparison.anchorId === effectiveAnchorId
         )
         .sort(
           (a, b) =>
             new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
         ),
-    [comparisons, selectedAnchorId]
+    [comparisons, effectiveAnchorId]
   );
+  const threadTreeItems = useMemo(() => {
+    if (!thread) {
+      return [];
+    }
+
+    const messageCountByThreadId = new Map<string, number>();
+
+    Object.values(messages).forEach((message) => {
+      if (message.contentState === "deleted") {
+        return;
+      }
+
+      messageCountByThreadId.set(
+        message.threadId,
+        (messageCountByThreadId.get(message.threadId) ?? 0) + 1
+      );
+    });
+
+    const visited = new Set<string>();
+    let cursor: typeof thread | undefined = thread;
+
+    while (cursor && !visited.has(cursor.id)) {
+      visited.add(cursor.id);
+      cursor = cursor.parentThreadId ? threads[cursor.parentThreadId] : undefined;
+    }
+
+    const rootId = [...visited]
+      .map((id) => threads[id])
+      .find((item) => item && !item.parentThreadId)?.id;
+    const root = rootId ? threads[rootId] : thread;
+    const childrenByParentId = new Map<string, LocalThread[]>();
+
+    Object.values(threads)
+      .filter((item) => item.status !== "deleted")
+      .sort(
+        (a, b) =>
+          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      )
+      .forEach((item) => {
+        const parentId = item.parentThreadId;
+
+        if (!parentId) {
+          return;
+        }
+
+        const siblings = childrenByParentId.get(parentId) ?? [];
+
+        siblings.push(item);
+        childrenByParentId.set(parentId, siblings);
+      });
+
+    const shouldShowThread = (item: LocalThread) =>
+      item.id === thread.id ||
+      (messageCountByThreadId.get(item.id) ?? 0) > 0 ||
+      item.status !== "active";
+
+    const rows: Array<{
+      id: string;
+      depth: number;
+      role: string;
+      label: string;
+      fullLabel: string;
+      status: LocalThread["status"];
+      messageCount: number;
+      mapCount: number;
+      isCurrent: boolean;
+      isDraft: boolean;
+    }> = [];
+
+    const visit = (item: LocalThread, depth: number) => {
+      if (!shouldShowThread(item)) {
+        return;
+      }
+
+      const firstQuestion = Object.values(messages)
+        .filter((message) => message.threadId === item.id)
+        .sort(
+          (a, b) =>
+            new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        )
+        .find((message) => message.role === "user");
+      const isCurrent = item.id === thread.id;
+      const messageCount = messageCountByThreadId.get(item.id) ?? 0;
+      const mapCount = Object.values(comparisons).filter(
+        (comparison) =>
+          comparison.status !== "deleted" &&
+          comparison.anchorId === item.anchorId
+      ).length;
+      const role = isCurrent
+        ? "Current"
+        : depth === 0
+          ? "Root"
+          : "Follow-up";
+      const label = compactLabel(
+        firstQuestion?.content ?? item.selectedText,
+        role
+      );
+
+      rows.push({
+        id: item.id,
+        depth,
+        role,
+        label,
+        fullLabel: firstQuestion?.content ?? item.selectedText ?? role,
+        status: item.status,
+        messageCount,
+        mapCount,
+        isCurrent,
+        isDraft: messageCount === 0
+      });
+
+      (childrenByParentId.get(item.id) ?? []).forEach((child) => {
+        visit(child, depth + 1);
+      });
+    };
+
+    visit(root, 0);
+
+    return rows;
+  }, [comparisons, messages, thread, threads]);
   const shouldShowContextNotesPanel =
+    isActivePanel &&
     Boolean(thread && anchor && selectedText) &&
     (contextNotesOpen || anchorAnnotations.length > 0);
+  const revisionSuggestionText = thread
+    ? revisionSuggestions[thread.id] ?? "No revised sentence returned yet."
+    : "";
+
+  function openThreadFromStack(targetThreadId: string) {
+    const targetThread = threads[targetThreadId];
+
+    if (!targetThread) {
+      return;
+    }
+
+    openThread(targetThreadId);
+
+    const comparison = Object.values(comparisons)
+      .filter(
+        (item) =>
+          item.status !== "deleted" &&
+          item.anchorId === targetThread.anchorId
+      )
+      .sort(
+        (a, b) =>
+          new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+      )[0];
+
+    if (comparison) {
+      openComparisonWindow(comparison.id);
+    } else {
+      closeComparisonWindow();
+    }
+  }
 
   useEffect(() => {
     setContextNotesOpen(false);
     setAnnotationText("");
-  }, [selectedThreadId]);
+  }, [effectiveThreadId]);
 
   useEffect(() => {
     if (!contextNotesOpen) {
@@ -197,7 +383,7 @@ export function SideThreadPanel() {
   function submitQuestion() {
     const currentQuestion = question.trim();
 
-    if (!currentQuestion || isAskingLocalQuestion) {
+    if (!currentQuestion || isAskingLocalQuestion || !isActivePanel) {
       return;
     }
 
@@ -256,17 +442,25 @@ export function SideThreadPanel() {
   const isDeleted = thread?.status === "deleted";
   const isHidden = thread?.visibility === "hidden" && !isDeleted;
   const showLocalThinking = Boolean(
-    thread && isAskingLocalQuestion && !isDeleted && !isHidden
+    thread && isActivePanel && isAskingLocalQuestion && !isDeleted && !isHidden
   );
 
   return (
-    <section className="panel min-h-0 overflow-hidden rounded-lg max-[900px]:h-[520px]">
+    <section
+      className={`panel min-h-0 overflow-hidden rounded-lg max-[900px]:h-[520px] ${
+        chainRole === "parent" ? "border-blue-100 bg-blue-50/30" : ""
+      }`}
+    >
       <div className="flex h-full flex-col">
-        <div className="flex h-14 items-center justify-between border-b border-line px-4">
-          <h2 className="text-lg font-bold text-ink">
-            {branchWindow?.title ?? "Local Branch Window"}{" "}
-            <span className="text-sm font-medium text-muted">(local context)</span>
-          </h2>
+        <div className="flex h-14 items-center justify-between gap-3 border-b border-line px-4">
+          <div className="flex min-w-0 items-baseline gap-2">
+            <h2 className="truncate text-lg font-bold text-ink">
+              Ask Locally
+            </h2>
+            <span className="shrink-0 text-sm font-medium text-muted">
+              (local context)
+            </span>
+          </div>
           <div className="flex items-center gap-1">
             {branchWindow && (
               <select
@@ -274,6 +468,7 @@ export function SideThreadPanel() {
                 onChange={(event) =>
                   setWindowModel(branchWindow.id, event.target.value)
                 }
+                disabled={!isActivePanel}
                 className="h-8 max-w-[160px] rounded-md border border-line bg-white px-2 text-xs font-semibold text-slate-700"
                 title="Branch window model"
                 aria-label="Branch window model"
@@ -285,24 +480,111 @@ export function SideThreadPanel() {
                 ))}
               </select>
             )}
-            <button
-              onClick={minimizeSideThread}
-              className="grid h-8 w-8 place-items-center rounded-md text-slate-600 hover:bg-slate-100"
-              title="Minimize"
-              aria-label="Minimize"
-            >
-              <Minus size={18} />
-            </button>
-            <button
-              onClick={closeSideThread}
-              className="grid h-8 w-8 place-items-center rounded-md text-slate-600 hover:bg-slate-100"
-              title="Close"
-              aria-label="Close"
-            >
-              <CircleX size={18} />
-            </button>
+            {isActivePanel ? (
+              <>
+                <button
+                  onClick={minimizeSideThread}
+                  className="grid h-8 w-8 place-items-center rounded-md text-slate-600 hover:bg-slate-100"
+                  title="Minimize"
+                  aria-label="Minimize"
+                >
+                  <Minus size={18} />
+                </button>
+                <button
+                  onClick={closeSideThread}
+                  className="grid h-8 w-8 place-items-center rounded-md text-slate-600 hover:bg-slate-100"
+                  title="Close"
+                  aria-label="Close"
+                >
+                  <CircleX size={18} />
+                </button>
+              </>
+            ) : (
+              <span className="rounded-full border border-blue-100 bg-white px-2 py-1 text-xs font-bold text-atlasBlue">
+                Parent
+              </span>
+            )}
           </div>
         </div>
+        {thread && (
+          <div className="border-b border-line bg-slate-50/70 px-3 py-2">
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <span className="text-[11px] font-bold uppercase tracking-wide text-muted">
+                Local thread tree
+              </span>
+              <span className="text-[11px] font-semibold text-muted">
+                Empty drafts hide after switching
+              </span>
+            </div>
+            <div className="thin-scrollbar max-h-32 space-y-1 overflow-auto pr-1">
+              {threadTreeItems.map((item) => (
+                <div
+                  key={item.id}
+                  className="flex items-center"
+                  style={{ paddingLeft: item.depth * 16 }}
+                >
+                  {item.depth > 0 && (
+                    <span className="mr-2 h-px w-4 shrink-0 bg-slate-300" />
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => openThreadFromStack(item.id)}
+                    title={item.fullLabel}
+                    className={`group flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md border px-2 text-left text-xs ${
+                      item.isCurrent
+                        ? "border-blue-200 bg-blue-600 text-white shadow-sm"
+                        : "border-line bg-white text-slate-700 hover:border-blue-200 hover:bg-blue-50 hover:text-atlasBlue"
+                    }`}
+                  >
+                    <span
+                      className={`h-2 w-2 shrink-0 rounded-full ${
+                        item.isDraft
+                          ? "border border-current bg-transparent"
+                          : item.isCurrent
+                            ? "bg-white"
+                            : "bg-atlasBlue"
+                      }`}
+                    />
+                    <span className="shrink-0 font-bold opacity-80">
+                      {item.role}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate font-semibold">
+                      {item.label}
+                    </span>
+                    {item.isDraft && (
+                      <span className="shrink-0 rounded-full bg-white/20 px-1.5 py-0.5 text-[10px] font-bold">
+                        draft
+                      </span>
+                    )}
+                    {!item.isDraft && (
+                      <span className="shrink-0 text-[10px] opacity-75">
+                        {item.messageCount}
+                      </span>
+                    )}
+                    {item.status !== "active" && (
+                      <span className="shrink-0 text-[10px] opacity-75">
+                        {item.status.replaceAll("_", " ")}
+                      </span>
+                    )}
+                  </button>
+                  {item.mapCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openThreadFromStack(item.id);
+                      }}
+                      className="ml-1 h-8 shrink-0 rounded-md border border-purple-100 bg-purple-50 px-2 text-[11px] font-bold text-atlasPurple hover:bg-purple-100"
+                      title="Open this thread's semantic map"
+                    >
+                      Map
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="thin-scrollbar min-h-0 flex-1 overflow-auto p-4">
           {anchor && selectedText ? (
@@ -377,12 +659,19 @@ export function SideThreadPanel() {
                     value={question}
                     onChange={(event) => setQuestion(event.target.value)}
                     onKeyDown={handleQuestionKeyDown}
+                    disabled={!isActivePanel}
                     className="min-h-16 flex-1 resize-none border-0 bg-transparent text-sm leading-6 outline-none placeholder:text-slate-400"
-                    placeholder="Ask a local question about this sentence..."
+                    placeholder={
+                      isActivePanel
+                        ? "Ask a local question about this sentence..."
+                        : "Parent context is shown for reference."
+                    }
                   />
                   <button
                     onClick={submitQuestion}
-                    disabled={isAskingLocalQuestion || !question.trim()}
+                    disabled={
+                      !isActivePanel || isAskingLocalQuestion || !question.trim()
+                    }
                     className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-atlasBlue text-white disabled:opacity-50"
                     title="Send"
                     aria-label="Send"
@@ -391,7 +680,11 @@ export function SideThreadPanel() {
                   </button>
                   <button
                     onClick={regenerateLocalQuestion}
-                    disabled={isAskingLocalQuestion || threadMessages.length === 0}
+                    disabled={
+                      !isActivePanel ||
+                      isAskingLocalQuestion ||
+                      threadMessages.length === 0
+                    }
                     className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-line bg-white text-slate-700 disabled:opacity-50"
                     title="Regenerate"
                     aria-label="Regenerate"
@@ -424,7 +717,7 @@ export function SideThreadPanel() {
                       parentLocalSelectionId={thread?.sourceLocalSelectionId}
                       sourceThreadType={thread?.revisionThreadType ?? "local"}
                       onAskAboutThis={(selection) =>
-                        openSelectionBranch(nestedSelection(selection, message), "revise")
+                        openSelectionBranch(nestedSelection(selection, message), "ask")
                       }
                       onReviseThis={(selection) =>
                         openSelectionBranch(nestedSelection(selection, message), "revise")
@@ -455,7 +748,7 @@ export function SideThreadPanel() {
                 </div>
               )}
 
-              {!isDeleted && !isHidden && isGeneratingComparison && (
+              {!isDeleted && !isHidden && isActivePanel && isGeneratingComparison && (
                 <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm font-semibold leading-6 text-atlasBlue">
                   <div className="flex items-center gap-2">
                     <Sparkles size={17} className="animate-pulse" />
@@ -470,7 +763,58 @@ export function SideThreadPanel() {
                     <Sparkles size={17} />
                     Revision Suggestion
                   </div>
-                  {thread ? revisionSuggestions[thread.id] ?? "No revised sentence returned yet." : ""}
+                  {thread && latestAssistantMessage ? (
+                    <DocumentAnswerRenderer
+                      answerId={`${thread.id}-revision-suggestion`}
+                      text={revisionSuggestionText}
+                      toolbarMode="local_answer"
+                      source={{
+                        conversationId: latestAssistantMessage.sessionId,
+                        sourceType: "message",
+                        sourceId:
+                          latestAssistantMessage.revisionMessageId ??
+                          latestAssistantMessage.id,
+                        sourceMessageId:
+                          latestAssistantMessage.revisionMessageId ??
+                          latestAssistantMessage.id,
+                        sourceAnswerId:
+                          latestAssistantMessage.revisionMessageId ??
+                          latestAssistantMessage.id,
+                        sourceLocalThreadId: thread.revisionLocalThreadId,
+                        parentSelectionId: thread.sourceSelectionId,
+                        parentLocalSelectionId: thread.sourceLocalSelectionId,
+                        sourceThreadType: thread.revisionThreadType ?? "local"
+                      }}
+                      onAskAboutThis={(selection) =>
+                        openSelectionBranch(
+                          nestedSelection(selection, latestAssistantMessage),
+                          "ask"
+                        )
+                      }
+                      onReviseThis={(selection) =>
+                        openSelectionBranch(
+                          nestedSelection(selection, latestAssistantMessage),
+                          "revise"
+                        )
+                      }
+                      onCreateBranch={(selection) =>
+                        openSelectionBranch(
+                          nestedSelection(selection, latestAssistantMessage),
+                          "branch"
+                        )
+                      }
+                      onAddNote={(selection) =>
+                        handleNestedNote(selection, latestAssistantMessage)
+                      }
+                      onMergeSelection={(selection) =>
+                        requestMergeFromSelection(
+                          nestedSelection(selection, latestAssistantMessage)
+                        )
+                      }
+                    />
+                  ) : (
+                    revisionSuggestionText
+                  )}
                 </div>
               )}
 
@@ -582,7 +926,7 @@ export function SideThreadPanel() {
           </div>
         )}
 
-        {thread && (
+        {thread && isActivePanel && (
           <ThreadActionBar
             disabled={false}
             noteActionsEnabled
@@ -595,7 +939,7 @@ export function SideThreadPanel() {
         )}
       </div>
 
-      {thread && (
+      {thread && isActivePanel && (
         <DeleteAnswerDialog
           open={deleteOpen}
           onCancel={() => setDeleteOpen(false)}

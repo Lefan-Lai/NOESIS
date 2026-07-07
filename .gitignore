@@ -9,3 +9,4 @@ pnpm-debug.log*
 pnpm-workspace.yaml.*
 dev-server*.log
 .codex-dev-*.log
+.dev-server/

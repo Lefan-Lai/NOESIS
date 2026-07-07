@@ -84,6 +84,12 @@ import {
 import { createAnnotation, deleteAnnotation as deleteAnnotationModel } from "@/lib/thread/annotations";
 import { createGeneratedDocumentState } from "@/lib/document/createGeneratedDocument";
 import { createArgumentComparisonFromTexts } from "@/lib/comparison/createArgumentComparison";
+import {
+  isTemporaryProjectName,
+  projectSnapshotHasContent,
+  projectTitleFromPrompt,
+  projectTitleFromPromptOrGenerated
+} from "@/lib/projectDisplay";
 import { MainConversationRevisionService } from "@/services/revision/MainConversationRevisionService";
 import { revisionRepository } from "@/services/revision/revisionRepository";
 import { TextSelectionService } from "@/services/revision/TextSelectionService";
@@ -1908,18 +1914,48 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
       const now = new Date().toISOString();
       const newProjectId = `project-${makeIdSuffix()}`;
       const currentProject = state.projects[state.currentProjectId];
+      const currentSnapshot = captureProjectSnapshot(state);
+
+      if (
+        currentProject &&
+        isTemporaryProjectName(currentProject.name) &&
+        !projectSnapshotHasContent(currentSnapshot)
+      ) {
+        const snapshot = emptyProjectSnapshot();
+        const projects = {
+          ...state.projects,
+          [state.currentProjectId]: {
+            ...currentProject,
+            name:
+              currentProject.name === "Default"
+                ? "Untitled Project"
+                : currentProject.name,
+            updatedAt: now,
+            snapshot
+          }
+        };
+
+        return applyProjectSnapshot(
+          {
+            ...state,
+            projects
+          },
+          snapshot
+        );
+      }
+
       const projects = {
         ...state.projects,
         [state.currentProjectId]: currentProject
           ? {
               ...currentProject,
               updatedAt: now,
-              snapshot: captureProjectSnapshot(state)
+              snapshot: currentSnapshot
             }
           : currentProject,
         [newProjectId]: {
           id: newProjectId,
-          name: `Project ${Object.keys(state.projects).length + 1}`,
+          name: "Untitled Project",
           updatedAt: now,
           snapshot: emptyProjectSnapshot()
         }
@@ -2451,6 +2487,10 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
         state,
         mainSession?.id ?? DEFAULT_MAIN_SESSION_ID
       );
+      const shouldAutoNameProject =
+        isTemporaryProjectName(state.projects[state.currentProjectId]?.name) &&
+        !projectSnapshotHasContent(state);
+      const promptProjectName = projectTitleFromPrompt(prompt);
       const startedRevision = MainConversationRevisionService.createStartedMainSend({
         state: revisionStateFromStore(state),
         projectId: state.currentProjectId,
@@ -2500,6 +2540,17 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
 
       set((current) => ({
         ...current,
+        projects:
+          shouldAutoNameProject && current.projects[state.currentProjectId]
+            ? {
+                ...current.projects,
+                [state.currentProjectId]: {
+                  ...current.projects[state.currentProjectId],
+                  name: promptProjectName,
+                  updatedAt: now
+                }
+              }
+            : current.projects,
         conversationMessages: {
           ...current.conversationMessages,
           [userConversationMessage.id]: userConversationMessage
@@ -2606,6 +2657,10 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
         suffix
       });
       const completedRevisionState = completedRevision.state;
+      const completedProjectName = projectTitleFromPromptOrGenerated(
+        prompt,
+        data.output.title
+      );
 
       set((current) => {
         const withConversation = appendConversationMessages({
@@ -2669,9 +2724,22 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
               isSideThreadOpen: false,
               isSideThreadMinimized: false
             };
+        const project = nextState.projects[state.currentProjectId];
+        const projects =
+          shouldAutoNameProject && project
+            ? {
+                ...nextState.projects,
+                [state.currentProjectId]: {
+                  ...project,
+                  name: completedProjectName,
+                  updatedAt: assistantCreatedAt
+                }
+              }
+            : nextState.projects;
 
         return {
           ...nextState,
+          projects,
           mainConversations: completedRevisionState.mainConversations,
           revisionMessages: completedRevisionState.revisionMessages,
           documentVersions: completedRevisionState.documentVersions,
@@ -3870,17 +3938,29 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
         includeInContext: true,
         createdAt: data.records.assistantMessage.createdAt
       };
+      const questionNode: VersionNode = {
+        id: `v-local-question-${suffix}`,
+        documentId,
+        parentId: activeVersionNodeId,
+        childIds: [],
+        nodeType: "local_question_asked",
+        label: "Local question asked",
+        relatedAnchorId: anchor.id,
+        relatedThreadId: threadId,
+        isActivePath: true,
+        createdAt: data.records.userMessage.createdAt
+      };
       const node: VersionNode = {
         id: `v-local-answer-${suffix}`,
         documentId,
-        parentId: activeVersionNodeId,
+        parentId: questionNode.id,
         childIds: [],
         nodeType: "local_answer_generated",
         label: "Local answer generated",
         relatedAnchorId: anchor.id,
         relatedThreadId: threadId,
         isActivePath: true,
-        createdAt: now
+        createdAt: data.records.assistantMessage.createdAt
       };
       let generatedComparison: ArgumentComparison | null = null;
       const revisedTextForComparison =
@@ -4036,7 +4116,10 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
           assistantMessage: assistantConversationMessage,
           model: data.model
         });
-        let nextState = appendVersionNodeAndCheckout(nextWithMessages, node);
+        let nextState = appendVersionNodeAndCheckout(
+          appendVersionNodeAndCheckout(nextWithMessages, questionNode),
+          node
+        );
 
         if (generatedComparison) {
           const comparisonWindowId = treeWindowId(generatedComparison.id);

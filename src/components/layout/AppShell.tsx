@@ -44,8 +44,8 @@ export function AppShell({ documentId }: AppShellProps) {
   const topPanelCount = 1 + Number(sideThreadVisible) + Number(rightPanelVisible);
   const gridClass =
     sideThreadVisible && rightPanelVisible
-    ? "grid-cols-[minmax(520px,1.08fr)_minmax(340px,0.78fr)_minmax(520px,1.08fr)]"
-    : sideThreadVisible || rightPanelVisible
+      ? "grid-cols-[minmax(520px,1.08fr)_minmax(380px,0.82fr)_minmax(520px,1.08fr)]"
+      : sideThreadVisible || rightPanelVisible
       ? "grid-cols-[minmax(620px,1.08fr)_minmax(520px,0.92fr)]"
       : "grid-cols-1";
   const gridRowClass =
