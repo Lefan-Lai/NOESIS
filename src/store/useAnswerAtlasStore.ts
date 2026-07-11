@@ -195,10 +195,16 @@ export type ReviewFocus = {
   semanticRowId?: string;
   anchorId?: string;
   documentId?: string;
+  sourceMessageId?: string;
+  revisedThreadId?: string;
   originalBlockId?: string;
   revisedBlockId?: string;
   originalText?: string;
   revisedText?: string;
+  originalStartOffset?: number;
+  originalEndOffset?: number;
+  revisedStartOffset?: number;
+  revisedEndOffset?: number;
   originalIndex?: number;
   revisedIndex?: number;
   primaryChange?: string;
@@ -3824,6 +3830,28 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
       return;
     }
 
+    const existingThreadUserMessages = Object.values(state.messages).filter(
+      (message) =>
+        message.threadId === threadId &&
+        message.role === "user" &&
+        message.contentState !== "deleted"
+    );
+    const isThreadFollowUp = existingThreadUserMessages.length > 0;
+    const latestThreadNode = Object.values(state.versionNodes)
+      .filter(
+        (item) =>
+          item.relatedThreadId === threadId &&
+          (item.nodeType === "local_answer_generated" ||
+            item.nodeType === "local_question_asked")
+      )
+      .sort(
+        (a, b) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      )[0];
+    const localVisualParentId = isThreadFollowUp
+      ? latestThreadNode?.id ?? activeVersionNodeId
+      : activeVersionNodeId;
+
     const activeDocumentVersion = activeDocumentVersionFromStore(
       state,
       session?.id ?? DEFAULT_MAIN_SESSION_ID
@@ -3941,10 +3969,10 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
       const questionNode: VersionNode = {
         id: `v-local-question-${suffix}`,
         documentId,
-        parentId: activeVersionNodeId,
+        parentId: localVisualParentId,
         childIds: [],
         nodeType: "local_question_asked",
-        label: "Local question asked",
+        label: isThreadFollowUp ? "Local follow-up asked" : "Local question asked",
         relatedAnchorId: anchor.id,
         relatedThreadId: threadId,
         isActivePath: true,
@@ -3956,13 +3984,14 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
         parentId: questionNode.id,
         childIds: [],
         nodeType: "local_answer_generated",
-        label: "Local answer generated",
+        label: isThreadFollowUp ? "Local follow-up answer" : "Local answer generated",
         relatedAnchorId: anchor.id,
         relatedThreadId: threadId,
         isActivePath: true,
         createdAt: data.records.assistantMessage.createdAt
       };
       let generatedComparison: ArgumentComparison | null = null;
+      let comparisonEnrichmentPromise: Promise<ArgumentComparison | null> | null = null;
       const revisedTextForComparison =
         data.output.revisedText?.trim() || data.output.answer.trim();
       const comparisonContextItems = data.records.contextSnapshot.includedItems.map(
@@ -3975,49 +4004,47 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
 
       if (revisedTextForComparison) {
         set({ isGeneratingComparison: true });
-
-        try {
-          const comparisonResponse = await fetch("/api/llm/argument-comparison", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              documentId,
-              anchorId: anchor.id,
-              createdInVersionNodeId: node.id,
-              originalText: selectedText,
-              revisedText: revisedTextForComparison,
-              localQuestion: question,
-              localAnswer: data.output.answer,
-              model: data.model,
-              contextItems: comparisonContextItems
-            })
-          });
-
-          if (!comparisonResponse.ok) {
-            throw new Error("Failed to generate semantic comparison");
-          }
-
-          const comparisonData = (await comparisonResponse.json()) as {
-            provider: "openai" | "mock";
-            model: string;
-            output: {
-              comparison: ArgumentComparison;
-            };
-          };
-          generatedComparison = comparisonData.output.comparison;
-        } catch {
-          generatedComparison = createArgumentComparisonFromTexts({
-            idSuffix: `fallback-${suffix}`,
+        generatedComparison = createArgumentComparisonFromTexts({
+          idSuffix: `instant-${suffix}`,
+          documentId,
+          anchorId: anchor.id,
+          originalText: selectedText,
+          revisedText: revisedTextForComparison,
+          createdInVersionNodeId: node.id,
+          now
+        });
+        comparisonEnrichmentPromise = fetch("/api/llm/argument-comparison", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
             documentId,
             anchorId: anchor.id,
+            createdInVersionNodeId: node.id,
             originalText: selectedText,
             revisedText: revisedTextForComparison,
-            createdInVersionNodeId: node.id,
-            now
-          });
-        }
+            localQuestion: question,
+            localAnswer: data.output.answer,
+            model: data.model,
+            contextItems: comparisonContextItems
+          })
+        })
+          .then(async (comparisonResponse) => {
+            if (!comparisonResponse.ok) {
+              return null;
+            }
+
+            const comparisonData = (await comparisonResponse.json()) as {
+              provider: "openai" | "mock";
+              model: string;
+              output: {
+                comparison: ArgumentComparison;
+              };
+            };
+            return comparisonData.output.comparison;
+          })
+          .catch(() => null);
       }
 
       let comparisonRevisionSync: Partial<RevisionRepositoryState> | null = null;
@@ -4245,11 +4272,70 @@ export const useAnswerAtlasStore = create<AnswerAtlasState>()(
       if (comparisonRevisionSync) {
         void syncRevisionFoundation(comparisonRevisionSync);
       }
-    } catch {
-      set({ isAskingLocalQuestion: false });
-    }
 
-    set({ isGeneratingComparison: false });
+      if (comparisonEnrichmentPromise && generatedComparison) {
+        const stableComparison = generatedComparison;
+
+        void comparisonEnrichmentPromise
+          .then((enrichedComparison) => {
+            if (!enrichedComparison) {
+              return;
+            }
+
+            set((current) => {
+              const existing = current.comparisons[stableComparison.id];
+
+              if (!existing || existing.status === "deleted") {
+                return current;
+              }
+
+              const enrichedSemanticMap = enrichedComparison.semanticMap
+                ? {
+                    ...enrichedComparison.semanticMap,
+                    id: existing.semanticMap?.id ?? enrichedComparison.semanticMap.id,
+                    documentId: existing.documentId,
+                    anchorId: existing.anchorId,
+                    originalText:
+                      existing.semanticMap?.originalText ?? selectedText,
+                    revisedText:
+                      existing.semanticMap?.revisedText ?? revisedTextForComparison
+                  }
+                : existing.semanticMap;
+
+              return {
+                ...current,
+                comparisons: {
+                  ...current.comparisons,
+                  [existing.id]: {
+                    ...enrichedComparison,
+                    id: existing.id,
+                    documentId: existing.documentId,
+                    anchorId: existing.anchorId,
+                    createdInVersionNodeId: existing.createdInVersionNodeId,
+                    status: existing.status,
+                    createdAt: existing.createdAt,
+                    updatedAt: new Date().toISOString(),
+                    semanticMap: enrichedSemanticMap,
+                    board: {
+                      ...enrichedComparison.board,
+                      board_id: existing.board.board_id
+                    },
+                    scaffold: {
+                      ...enrichedComparison.scaffold,
+                      comparison_id: existing.scaffold.comparison_id
+                    }
+                  }
+                }
+              };
+            });
+          })
+          .finally(() => set({ isGeneratingComparison: false }));
+      } else {
+        set({ isGeneratingComparison: false });
+      }
+    } catch {
+      set({ isAskingLocalQuestion: false, isGeneratingComparison: false });
+    }
     get().refreshContextPreview();
   },
 

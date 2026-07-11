@@ -9,10 +9,16 @@ export function getComparisonForAnchor(
   }
 
   return (
-    Object.values(comparisons).find(
-      (comparison) =>
-        comparison.anchorId === anchorId &&
-        (comparison.status === "active" || comparison.status === "merged")
-    ) ?? null
+    Object.values(comparisons)
+      .filter(
+        (comparison) =>
+          comparison.anchorId === anchorId &&
+          (comparison.status === "active" || comparison.status === "merged")
+      )
+      .sort(
+        (a, b) =>
+          new Date(b.updatedAt ?? b.createdAt).getTime() -
+          new Date(a.updatedAt ?? a.createdAt).getTime()
+      )[0] ?? null
   );
 }

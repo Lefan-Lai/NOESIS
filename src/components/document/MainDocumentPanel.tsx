@@ -10,7 +10,6 @@ import {
   DocumentAnswerRenderer,
   type TextSelectionDraft
 } from "./DocumentAnswerRenderer";
-import { DocumentToolbar } from "./DocumentToolbar";
 import { DiffReviewModal } from "./DiffReviewModal";
 import { DocumentVersionHistoryPanel } from "./DocumentVersionHistoryPanel";
 import {
@@ -519,9 +518,9 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
   }
 
   return (
-    <main className="panel min-h-0 overflow-hidden rounded-lg max-[900px]:h-[520px]">
+    <main className="panel h-full min-h-0 min-w-[320px] overflow-hidden rounded-lg max-[900px]:h-[520px]">
       <div className="flex h-full flex-col">
-        <div className="flex h-14 items-center justify-between border-b border-line px-4">
+        <div className="flex h-12 items-center justify-between border-b border-line px-4">
           <h2 className="truncate text-lg font-bold text-ink">
             {mainWindow?.title ?? "Main Answer Window"}
             <span className="ml-2 text-sm font-medium text-muted">
@@ -545,7 +544,6 @@ export function MainDocumentPanel({ documentId }: MainDocumentPanelProps) {
             </button>
           </div>
         </div>
-        <DocumentToolbar />
         <div
           ref={chatAreaRef}
           className="thin-scrollbar min-h-0 flex-1 overflow-auto px-4 py-4"

@@ -3,8 +3,11 @@
 import { useMemo, useState } from "react";
 import {
   Bot,
+  ChevronDown,
+  ChevronUp,
   Loader2,
   Maximize2,
+  MessageCircle,
   MoreHorizontal,
   Send,
   UserRound,
@@ -17,7 +20,7 @@ import { MarkdownText } from "@/components/MarkdownText";
 import { ConfirmationModal } from "@/components/actions/ConfirmationModal";
 import { ButtonStateResolver } from "@/services/revision/ButtonStateResolver";
 import type { ConfirmationRequirement } from "@/types/workspaceActions";
-import { SemanticDifferenceMapView } from "./SemanticDifferenceMapView";
+import { CompactSemanticDifferenceMapView } from "./CompactSemanticDifferenceMapView";
 
 function getAnchorLabel(blockId?: string) {
   return blockId ? blockId.toUpperCase() : "-";
@@ -29,6 +32,7 @@ export function ArgumentEvidenceComparison() {
   const [deleteConfirmation, setDeleteConfirmation] =
     useState<ConfirmationRequirement>();
   const [treeQuestion, setTreeQuestion] = useState("");
+  const [chatOpen, setChatOpen] = useState(false);
   const comparisons = useAnswerAtlasStore((state) => state.comparisons);
   const comparisonGraphs = useAnswerAtlasStore(
     (state) => state.comparisonGraphs
@@ -261,25 +265,25 @@ export function ArgumentEvidenceComparison() {
 
   return (
     <section
-      className={`panel min-h-0 overflow-hidden rounded-lg max-[900px]:h-[560px] ${
+      className={`panel min-h-0 min-w-[320px] overflow-hidden rounded-lg max-[900px]:h-[560px] ${
         isComparisonExpanded
           ? "fixed bottom-[300px] left-4 right-4 top-20 z-40"
-          : ""
+          : "h-full"
       }`}
     >
       <div className="flex h-full flex-col">
-        <div className="flex h-14 items-center justify-between border-b border-line px-4">
+        <div className="flex h-12 items-center justify-between border-b border-line px-4">
           <div>
-            <h2 className="text-lg font-bold text-ink">
+            <h2 className="text-base font-bold text-ink">
               Semantic Difference Map
             </h2>
-            <p className="text-sm text-muted">Semantic alignment of original vs revised</p>
+            <p className="text-xs text-muted">Semantic alignment of original vs revised</p>
           </div>
           <div className="flex items-center gap-1">
             {isGeneratingComparison && (
               <span className="mr-1 inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-atlasBlue">
                 <Loader2 size={13} className="animate-spin" />
-                Generating
+                Refining
               </span>
             )}
             {treeWindow && (
@@ -369,17 +373,32 @@ export function ArgumentEvidenceComparison() {
 
         <div className="thin-scrollbar min-h-0 flex-1 overflow-auto p-4">
           {isGeneratingComparison && (
-            <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-semibold text-atlasBlue shadow-sm">
+            <div className="mb-3 flex items-center gap-2 border-b border-blue-100 bg-blue-50/70 px-3 py-2 text-xs font-semibold text-atlasBlue">
               <div className="flex items-center gap-2">
-                <Loader2 size={17} className="animate-spin" />
-                Semantic map is generating...
+                <Loader2 size={14} className="animate-spin" />
+                Precise changes are ready. Refining semantic labels in the background...
               </div>
             </div>
           )}
           {comparison ? (
             <div className="space-y-4">
-              {semanticMap && <SemanticDifferenceMapView map={semanticMap} />}
-              <div className="rounded-lg border border-line bg-slate-50/70 p-3">
+              {semanticMap && <CompactSemanticDifferenceMapView map={semanticMap} />}
+              <button
+                type="button"
+                onClick={() => setChatOpen((value) => !value)}
+                className="flex w-full items-center gap-2 rounded-md border border-line bg-white px-3 py-2 text-left text-sm font-bold text-slate-700 hover:bg-slate-50"
+                aria-expanded={chatOpen}
+              >
+                <MessageCircle size={16} className="text-atlasPurple" />
+                <span className="flex-1">Ask about this map</span>
+                {treeMessages.length > 0 && (
+                  <span className="rounded bg-slate-100 px-2 py-0.5 text-xs text-muted">
+                    {treeMessages.length}
+                  </span>
+                )}
+                {chatOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+              </button>
+              {chatOpen && <div className="rounded-lg border border-line bg-slate-50/70 p-3">
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <div className="text-sm font-bold text-ink">
                     Board chat
@@ -449,7 +468,7 @@ export function ArgumentEvidenceComparison() {
                     <Send size={16} />
                   </button>
                 </div>
-              </div>
+              </div>}
             </div>
           ) : (
             <div className="grid h-full place-items-center text-sm text-muted">
@@ -457,7 +476,7 @@ export function ArgumentEvidenceComparison() {
                 <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 font-semibold text-atlasBlue shadow-sm">
                   <div className="flex items-center gap-2">
                     <Loader2 size={17} className="animate-spin" />
-                    Generating semantic comparison...
+                    Preparing precise comparison...
                   </div>
                 </div>
               ) : (
@@ -467,25 +486,13 @@ export function ArgumentEvidenceComparison() {
           )}
         </div>
 
-        <div className="grid h-12 grid-cols-[1fr_120px_120px] items-center gap-3 border-t border-line px-4 text-sm">
+        <div className="flex min-h-10 items-center border-t border-line px-4 py-2 text-sm">
           <div className="truncate font-semibold text-slate-700">
-            Selected Anchor Sentence:{" "}
+            Source:{" "}
             <span className="text-ink">
               {selectedAnchor?.anchorType === "text_selection"
-                ? "Selection"
+                ? selectedAnchor.selectedText
                 : getAnchorLabel(selectedAnchor?.blockId)}
-            </span>
-          </div>
-          <div className="text-center text-muted">
-            Original:{" "}
-            <span className="rounded bg-blue-50 px-2 py-1 font-bold text-atlasBlue">
-              C0
-            </span>
-          </div>
-          <div className="text-center text-muted">
-            Revised:{" "}
-            <span className="rounded bg-blue-50 px-2 py-1 font-bold text-atlasBlue">
-              C1
             </span>
           </div>
         </div>

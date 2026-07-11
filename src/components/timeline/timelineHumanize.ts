@@ -68,6 +68,9 @@ export type HumanTimelineBuildOptions = {
   showInactive: boolean;
   showMemory: boolean;
   showRemovedPaths: boolean;
+  showMain?: boolean;
+  showLocal?: boolean;
+  showDrafts?: boolean;
   maxVisibleDepth: number | "all";
   collapseLargeBranches: boolean;
 };
@@ -543,6 +546,54 @@ function getLocalAnswerForNode(node: VersionNode, context: HumanTimelineContext)
   return findThreadMessageBySuffix(context, suffix, "assistant")?.content;
 }
 
+function threadUserMessageCountBefore(
+  node: VersionNode,
+  context: HumanTimelineContext,
+  inclusive: boolean
+) {
+  if (!node.relatedThreadId) {
+    return 0;
+  }
+
+  const nodeTime = new Date(node.createdAt).getTime();
+
+  return Object.values(context.threadMessages ?? {}).filter((message) => {
+    if (
+      message.threadId !== node.relatedThreadId ||
+      message.role !== "user" ||
+      message.contentState === "deleted"
+    ) {
+      return false;
+    }
+
+    const messageTime = new Date(message.createdAt).getTime();
+
+    return inclusive ? messageTime <= nodeTime : messageTime < nodeTime;
+  }).length;
+}
+
+function isLocalFollowUpNode(node: VersionNode, context: HumanTimelineContext) {
+  if (!node.relatedThreadId) {
+    return false;
+  }
+
+  if (node.nodeType === "local_question_asked") {
+    return (
+      /follow-up/i.test(node.label) ||
+      threadUserMessageCountBefore(node, context, false) > 0
+    );
+  }
+
+  if (node.nodeType === "local_answer_generated") {
+    return (
+      /follow-up/i.test(node.label) ||
+      threadUserMessageCountBefore(node, context, true) > 1
+    );
+  }
+
+  return false;
+}
+
 function getRelatedObjects(node: VersionNode, context: HumanTimelineContext) {
   const anchor = node.relatedAnchorId
     ? context.anchors[node.relatedAnchorId]
@@ -560,7 +611,7 @@ function getRelatedObjects(node: VersionNode, context: HumanTimelineContext) {
 function selectedTextForNode(node: VersionNode, context: HumanTimelineContext) {
   const { anchor, thread, branch } = getRelatedObjects(node, context);
 
-  return anchor?.selectedText || thread?.selectedText || branch?.selectedText;
+  return thread?.selectedText || anchor?.selectedText || branch?.selectedText;
 }
 
 function sourceAnchorForNode(node: VersionNode, context: HumanTimelineContext) {
@@ -593,6 +644,10 @@ function logicFocusForNode(
     return undefined;
   }
 
+  if (inheritedFocus && node.relatedThreadId && isThreadProgressNode(node)) {
+    return inheritedFocus;
+  }
+
   if (
     node.nodeType === "branch_created" ||
     node.nodeType === "revision_generated" ||
@@ -607,10 +662,16 @@ function logicFocusForNode(
     }
   }
 
-  const localQuestion = getLocalQuestionForNode(node, context);
   const selectedText = selectedTextForNode(node, context);
+  const localQuestion = getLocalQuestionForNode(node, context);
   const localAnswer = getLocalAnswerForNode(node, context);
-  const focus = logicFocusFromText(localQuestion || selectedText || localAnswer);
+  const normalizedSelection = normalizeKey(selectedText);
+  const focus = normalizedSelection
+    ? {
+        key: `selected-${normalizedSelection.slice(0, 120)}`,
+        label: excerpt(selectedText, 42)
+      }
+    : logicFocusFromText(localQuestion || localAnswer);
 
   if (!focus) {
     return inheritedFocus;
@@ -1022,14 +1083,22 @@ function titleForNode(node: VersionNode, context: HumanTimelineContext) {
   }
 
   if (node.nodeType === "local_question_asked") {
-    return actionTitle("Check", localQuestion || selectedText, "Check");
+    const followUp = isLocalFollowUpNode(node, context);
+    return actionTitle(
+      followUp ? "Follow-up" : "Check",
+      followUp ? localQuestion || selectedText : selectedText || localQuestion,
+      followUp ? "Follow-up question" : "Check"
+    );
   }
 
   if (node.nodeType === "local_answer_generated") {
+    const followUp = isLocalFollowUpNode(node, context);
     return actionTitle(
-      "Question",
-      localQuestion || selectedText || localAnswer,
-      "Local question"
+      followUp ? "Follow-up" : "Check",
+      followUp
+        ? localQuestion || selectedText || localAnswer
+        : selectedText || localQuestion || localAnswer,
+      followUp ? "Follow-up" : "Check"
     );
   }
 
@@ -1101,14 +1170,22 @@ function shortTitleForNode(node: VersionNode, context: HumanTimelineContext) {
   }
 
   if (node.nodeType === "local_question_asked") {
-    return actionShortTitle("Check", localQuestion || selectedText, "Check");
+    const followUp = isLocalFollowUpNode(node, context);
+    return actionShortTitle(
+      followUp ? "Follow-up" : "Check",
+      followUp ? localQuestion || selectedText : selectedText || localQuestion,
+      followUp ? "Follow-up" : "Check"
+    );
   }
 
   if (node.nodeType === "local_answer_generated") {
+    const followUp = isLocalFollowUpNode(node, context);
     return actionShortTitle(
-      "Q",
-      localQuestion || selectedText || localAnswer,
-      "Local question"
+      followUp ? "Follow-up" : "Check",
+      followUp
+        ? localQuestion || selectedText || localAnswer
+        : selectedText || localQuestion || localAnswer,
+      followUp ? "Follow-up" : "Check"
     );
   }
 
@@ -1147,7 +1224,11 @@ function shortTitleForNode(node: VersionNode, context: HumanTimelineContext) {
   return excerpt(readableLabel(node.label), 28);
 }
 
-function relationForNode(node: VersionNode, laneId: TimelineLaneId) {
+function relationForNode(
+  node: VersionNode,
+  laneId: TimelineLaneId,
+  context: HumanTimelineContext
+) {
   if (node.nodeType === "merged") {
     return "merge back";
   }
@@ -1173,7 +1254,7 @@ function relationForNode(node: VersionNode, laneId: TimelineLaneId) {
   }
 
   if (node.nodeType === "local_answer_generated") {
-    return "local question";
+    return isLocalFollowUpNode(node, context) ? "follow-up" : "check";
   }
 
   if (node.nodeType === "revision_generated") {
@@ -1388,7 +1469,7 @@ export function humanizeTimelineNode(
           ? "return to"
           : computed?.isAnchorHub
             ? "anchor hub"
-            : relationForNode(node, laneId),
+            : relationForNode(node, laneId, context),
     logicAssignmentSource: computed?.logicAssignmentSource,
     logicRelationType: computed?.logicRelationType,
     logicRouterConfidence: computed?.logicRouterConfidence,
@@ -1703,6 +1784,13 @@ export function buildHumanTimeline(
       return [];
     }
 
+    // A local user message and its assistant reply form one visible reasoning
+    // turn. The reply node is the durable representative because it can open
+    // the complete persisted local conversation and comparison context.
+    if (node.nodeType === "local_question_asked") {
+      return [];
+    }
+
     const inactive = isInactiveNode(node);
 
     if (inactive && !options.showInactive) {
@@ -1712,6 +1800,23 @@ export function buildHumanTimeline(
     const memory = isMemoryNode(node);
 
     if (memory && !options.showMemory) {
+      return [];
+    }
+
+    if (isMainProgressNode(node) && options.showMain === false) {
+      return [];
+    }
+
+    if (node.nodeType === "local_answer_generated" && options.showLocal === false) {
+      return [];
+    }
+
+    if (
+      options.showDrafts === false &&
+      (node.nodeType === "branch_created" ||
+        node.nodeType === "revision_generated" ||
+        node.nodeType === "merged")
+    ) {
       return [];
     }
 

@@ -32,89 +32,117 @@ type DocumentAnswerRendererProps = {
   onMergeSelection?: (selection: TextSelectionDraft) => void;
 };
 
-function normalizeReviewText(value: string) {
-  return value
-    .replace(/[“”]/g, "\"")
-    .replace(/[‘’]/g, "'")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
+type HighlightSet = {
+  add: (range: Range) => void;
+  delete: (range: Range) => void;
+};
 
-function importantWords(value: string) {
-  return normalizeReviewText(value)
-    .replace(/[^\p{L}\p{N}\s'-]/gu, " ")
-    .split(/\s+/)
-    .filter((word) => word.length > 3)
-    .slice(0, 16);
-}
+type HighlightRegistry = {
+  get: (name: string) => HighlightSet | undefined;
+  set: (name: string, highlight: HighlightSet) => void;
+};
 
-function findLinkedReviewElement(root: HTMLElement, snippet?: string) {
-  if (!snippet || normalizeReviewText(snippet).length < 6) {
+type HighlightConstructor = new (...ranges: Range[]) => HighlightSet;
+
+function exactTextRange(
+  root: HTMLElement,
+  snippet?: string,
+  preferredOffset?: number
+) {
+  if (!snippet) {
     return null;
   }
 
-  const normalizedSnippet = normalizeReviewText(snippet);
-  const candidates = Array.from(
-    root.querySelectorAll<HTMLElement>(
-      "p, li, blockquote, h1, h2, h3, h4, h5, h6, pre, code"
-    )
-  );
-  const directMatch = candidates.find((element) =>
-    normalizeReviewText(element.textContent ?? "").includes(normalizedSnippet)
-  );
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  let current = walker.nextNode();
 
-  if (directMatch) {
-    return directMatch;
+  while (current) {
+    nodes.push(current as Text);
+    current = walker.nextNode();
   }
 
-  const words = importantWords(snippet);
+  const fullText = nodes.map((node) => node.data).join("");
+  const matches: number[] = [];
+  let match = fullText.indexOf(snippet);
 
-  if (words.length < 3) {
+  while (match >= 0) {
+    matches.push(match);
+    match = fullText.indexOf(snippet, match + 1);
+  }
+
+  if (matches.length === 0) {
     return null;
   }
 
-  return (
-    candidates.find((element) => {
-      const text = normalizeReviewText(element.textContent ?? "");
-      const hits = words.filter((word) => text.includes(word)).length;
+  const start = typeof preferredOffset === "number"
+    ? matches.reduce((best, candidate) =>
+        Math.abs(candidate - preferredOffset) < Math.abs(best - preferredOffset)
+          ? candidate
+          : best
+      )
+    : matches[0];
+  const end = start + snippet.length;
+  let cursor = 0;
+  let startNode: Text | null = null;
+  let endNode: Text | null = null;
+  let startOffset = 0;
+  let endOffset = 0;
 
-      return hits >= Math.min(5, Math.ceil(words.length * 0.55));
-    }) ?? null
-  );
+  for (const node of nodes) {
+    const nodeEnd = cursor + node.data.length;
+
+    if (!startNode && start >= cursor && start <= nodeEnd) {
+      startNode = node;
+      startOffset = start - cursor;
+    }
+
+    if (!endNode && end >= cursor && end <= nodeEnd) {
+      endNode = node;
+      endOffset = end - cursor;
+      break;
+    }
+
+    cursor = nodeEnd;
+  }
+
+  if (!startNode || !endNode) {
+    return null;
+  }
+
+  const range = document.createRange();
+  range.setStart(startNode, startOffset);
+  range.setEnd(endNode, endOffset);
+
+  return { range, element: startNode.parentElement };
 }
 
-function clearLinkedReviewHighlight(root: HTMLElement) {
-  root
-    .querySelectorAll<HTMLElement>("[data-review-linked-focus='true']")
-    .forEach((element) => {
-      element.removeAttribute("data-review-linked-focus");
-      element.style.backgroundColor = "";
-      element.style.boxShadow = "";
-      element.style.borderRadius = "";
-      element.style.paddingInline = "";
-      element.style.scrollMargin = "";
-      element.style.transition = "";
-    });
-}
-
-function applyLinkedReviewHighlight(
-  element: HTMLElement,
+function addExactReviewHighlight(
+  root: HTMLElement,
+  snippet: string | undefined,
+  preferredOffset: number | undefined,
   tone: "original" | "revised"
 ) {
-  const isOriginal = tone === "original";
+  const registry = (CSS as unknown as { highlights?: HighlightRegistry }).highlights;
+  const HighlightClass = (globalThis as unknown as { Highlight?: HighlightConstructor }).Highlight;
+  const match = exactTextRange(root, snippet, preferredOffset);
 
-  element.setAttribute("data-review-linked-focus", "true");
-  element.style.backgroundColor = isOriginal
-    ? "rgba(37, 99, 235, 0.10)"
-    : "rgba(124, 58, 237, 0.11)";
-  element.style.boxShadow = isOriginal
-    ? "0 0 0 2px rgba(37, 99, 235, 0.24)"
-    : "0 0 0 2px rgba(124, 58, 237, 0.24)";
-  element.style.borderRadius = "8px";
-  element.style.paddingInline = "4px";
-  element.style.scrollMargin = "96px";
-  element.style.transition = "background-color 160ms ease, box-shadow 160ms ease";
+  if (!registry || !HighlightClass || !match) {
+    return null;
+  }
+
+  const name = tone === "original"
+    ? "noesis-review-original"
+    : "noesis-review-revised";
+  const highlight = registry.get(name) ?? new HighlightClass();
+
+  highlight.add(match.range);
+  registry.set(name, highlight);
+
+  return {
+    element: match.element,
+    clear: () => highlight.delete(match.range)
+  };
 }
 
 export function DocumentAnswerRenderer({
@@ -140,36 +168,52 @@ export function DocumentAnswerRenderer({
       return;
     }
 
-    clearLinkedReviewHighlight(root);
-
     if (!activeReviewFocus) {
       return;
     }
 
     const tone = toolbarMode === "main_answer" ? "original" : "revised";
+    const belongsToSource = tone === "original"
+      ? !activeReviewFocus.sourceMessageId ||
+        activeReviewFocus.sourceMessageId === source.sourceMessageId
+      : !activeReviewFocus.revisedThreadId ||
+        activeReviewFocus.revisedThreadId === source.sourceLocalThreadId;
+
+    if (!belongsToSource) {
+      return;
+    }
+
     const snippet =
       tone === "original"
         ? activeReviewFocus.originalText
         : activeReviewFocus.revisedText;
-    const target = findLinkedReviewElement(root, snippet);
+    const preferredOffset = tone === "original"
+      ? activeReviewFocus.originalStartOffset
+      : activeReviewFocus.revisedStartOffset;
+    const target = addExactReviewHighlight(root, snippet, preferredOffset, tone);
 
     if (!target) {
       return;
     }
 
-    applyLinkedReviewHighlight(target, tone);
-    target.scrollIntoView({
+    target.element?.scrollIntoView({
       behavior: "smooth",
       block: "center",
       inline: "nearest"
     });
 
-    return () => clearLinkedReviewHighlight(root);
+    return target.clear;
   }, [
     activeReviewFocus,
     activeReviewFocus?.id,
     activeReviewFocus?.originalText,
     activeReviewFocus?.revisedText,
+    activeReviewFocus?.originalStartOffset,
+    activeReviewFocus?.revisedStartOffset,
+    activeReviewFocus?.sourceMessageId,
+    activeReviewFocus?.revisedThreadId,
+    source.sourceLocalThreadId,
+    source.sourceMessageId,
     text,
     toolbarMode
   ]);

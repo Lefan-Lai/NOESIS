@@ -48,7 +48,7 @@ export function RevisionBranchPanel() {
 
   if (!branch) {
     return (
-      <section className="panel min-h-0 overflow-hidden rounded-lg max-[900px]:h-[520px]">
+      <section className="panel h-full min-h-0 min-w-[300px] overflow-hidden rounded-lg max-[900px]:h-[520px]">
         <div className="grid h-full place-items-center p-6 text-sm text-muted">
           No revision branch selected.
         </div>
@@ -69,7 +69,7 @@ export function RevisionBranchPanel() {
     );
 
   return (
-    <section className="panel min-h-0 overflow-hidden rounded-lg max-[900px]:h-[520px]">
+    <section className="panel h-full min-h-0 min-w-[300px] overflow-hidden rounded-lg max-[900px]:h-[520px]">
       <div className="flex h-full flex-col">
         <div className="flex h-14 items-center justify-between border-b border-line px-4">
           <h2 className="flex min-w-0 items-center gap-2 truncate text-lg font-bold text-ink">

@@ -10715,6 +10715,1542 @@ Result:
 passed
 ```
 
+## 2026-07-11 - Semantic Difference Map 精简、即时生成与精确高亮
+
+### 本次修改目标
+
+本轮针对三个直接影响使用的问题进行修改：
+
+```text
+1. Local Window 已经得到回答，但 Semantic Difference Map 的第二次 LLM 调用仍会阻塞整个提交流程，导致回答和 Map 都显得很慢。
+2. 旧 Map 默认展示 overview、多个 layer、大量卡片、技术编号和始终展开的 Board chat，信息密度过高。
+3. 旧高亮使用标准化文字和关键词模糊匹配，找到相似段落后会高亮整个 p/li，因此可能多高亮一个字、整句话或错误段落。
+```
+
+### 修改文件
+
+```text
+src/lib/comparison/preciseTextDiff.ts
+src/components/comparison/CompactSemanticDifferenceMapView.tsx
+src/components/comparison/ArgumentEvidenceComparison.tsx
+src/components/document/DocumentAnswerRenderer.tsx
+src/store/useAnswerAtlasStore.ts
+src/app/globals.css
+src/__tests__/precise-text-diff.test.ts
+```
+
+### 一、Map 生成改为“即时确定性结果 + 后台语义增强”
+
+旧流程是串行的：
+
+```text
+Local LLM 回答完成
+→ 等待 /api/llm/argument-comparison 再调用一次模型
+→ 第二次模型调用完成
+→ 才把 local user message、local assistant message 和 comparison 一起提交到界面
+```
+
+这会让用户误以为 Local Window 没有回答，实际上是程序在等待 Semantic Map 的第二次 LLM 请求。
+
+新流程是：
+
+```text
+Local LLM 回答完成
+→ 立即保存和显示 local user message / local assistant message
+→ 立即使用原文与修订文本生成确定性 comparison
+→ 立即打开可用的 Semantic Difference Map
+→ 后台调用 /api/llm/argument-comparison
+→ 后台结果返回后，只给同一个 comparison 补充语义说明和风险标签
+```
+
+关键约束：
+
+```text
+不会因为后台增强再创建第二个 comparison。
+不会改变 comparison 的稳定 id、documentId、anchorId、createdInVersionNodeId。
+不会改变已经建立的 WindowInstance 和 ConversationSession 关系。
+后台增强失败时保留即时确定性 Map，界面仍然可用。
+后台增强期间显示 Generating 状态，但不阻止用户阅读 Local 回答和精确差异。
+```
+
+界面文案进一步区分两个阶段：没有即时 Map 时显示 `Preparing precise comparison`；即时差异已经可读、后台 LLM 仍在运行时显示 `Refining` 和 `Precise changes are ready`，避免把后台补标签误解为整个 Map 尚未生成。
+
+同一锚点存在多个 active/merged comparison 时，读取逻辑不再返回对象集合中的第一条，而是按照 `updatedAt`、其次 `createdAt` 倒序选择最新结果，防止历史 Map 覆盖刚生成的 Map。
+
+### 二、精确文本差分算法
+
+新增：
+
+```text
+src/lib/comparison/preciseTextDiff.ts
+```
+
+算法直接比较 `originalText` 与 `revisedText`，输出每一个真正变化区间：
+
+```text
+PreciseTextChange {
+  type: added | removed | replaced
+  originalRange: { start, end }
+  revisedRange: { start, end }
+  originalText
+  revisedText
+}
+```
+
+偏移量使用 JavaScript/DOM 可直接使用的 UTF-16 offset。即使文字中存在 emoji 或其他代理对字符，返回的 offset 仍可直接交给 `String.slice` 和 DOM `Range`。
+
+短文本使用字符级 LCS，得到最小的真实增删区间。超长文本超过计算上限时，使用公共前缀/后缀策略，防止 Map 因差分矩阵过大而冻结浏览器。
+
+示例：
+
+```text
+Original: 决赛中，法国队对阵克罗地亚队
+Revised:  决赛中，法国队对阵美国队
+
+唯一变化：
+克罗地亚 → 美国
+
+“队”属于未修改文字，不会被包含进高亮范围。
+```
+
+### 三、紧凑型 Semantic Difference Map
+
+新增：
+
+```text
+src/components/comparison/CompactSemanticDifferenceMapView.tsx
+```
+
+`ArgumentEvidenceComparison` 不再挂载旧的 `SemanticDifferenceMapView`，改为紧凑视图。旧组件文件没有删除，以避免破坏历史兼容或其他引用。
+
+默认视图只显示：
+
+```text
+精确变化总数
+replaced / added / removed 数量
+整体 risk
+最多 6 个真实变化位置
+```
+
+默认不显示：
+
+```text
+unchanged 内容
+整段原文与整段修订文
+多层小卡片
+C0 / C1 技术编号
+始终展开的 Board chat
+```
+
+每条变化默认是一行。点击后才展开：
+
+```text
+Original 上下文，删除文字用红色标记
+Current 上下文，新增文字用绿色标记
+最多两个语义标签
+简短原因和 confidence
+```
+
+超过 6 条变化时，用户可以主动选择 Show more；系统不会一开始把所有变化全部铺开。
+
+Board chat 改为 `Ask about this map` 折叠入口，只有用户主动打开时才占用空间。已有 Board chat 消息仍然保留，折叠不等于 discard 或 delete。
+
+### 四、精确 DOM Range 高亮
+
+旧逻辑：
+
+```text
+标准化大小写、引号和空格
+→ 提取关键词
+→ 找到相似 p/li
+→ 给整个块加背景
+```
+
+新逻辑：
+
+```text
+读取精确 changed substring
+→ 在指定 source message 或 revised local thread 中查找完全一致的字符串
+→ 如果同一字符串出现多次，选择距离保存 offset 最近的 occurrence
+→ 建立 DOM Range
+→ 使用 CSS Custom Highlight API 只高亮该 Range
+```
+
+高亮所有权也被限制：
+
+```text
+Original 高亮只能进入 anchor.sourceMessageId 对应的主回答。
+Revised 高亮只能进入当前 revisedThreadId 对应的 Local Window。
+```
+
+如果找不到完全一致的文字，系统选择“不高亮”，不会再用模糊匹配猜测并高亮错误内容。
+
+### 五、Memory、持久化与 Timeline 影响
+
+本次没有删除任何数据，也没有删除旧 Semantic Map 组件。
+
+继续持久化的对象保持不变：
+
+```text
+local user Message
+local assistant Message
+TextSelection / LocalSelection
+LocalThread / Nested LocalThread
+ContextSnapshot
+LLMCallRecord
+EventLog
+TimelineNode
+TimelineEdge
+ComparisonGraph / ComparisonRun
+```
+
+Local 回答调用的 ContextSnapshot、LLMCallRecord、EventLog 和 Timeline 仍按照原流程保存。只是 comparison 的语义增强不再阻塞 Local 回答进入 UI。
+
+`activeReviewFocus` 仅用于连接 Map 行与两个可视文本窗口，包含精确 offset 和 source ownership。它属于瞬时 UI focus：
+
+```text
+不进入 main conversation memory
+不进入 local thread memory
+不写入 ContextSnapshot
+不发送给 LLM
+不创建 EventLog
+不创建 TimelineNode
+刷新或关闭相关视图后可以消失
+```
+
+本次没有修改以下规则：
+
+```text
+deleted memory 永远不能进入未来 ContextSnapshot
+discarded memory 默认排除但保留记录
+inactive path 默认排除
+unmerged local thread / branch 不进入 main context
+pending merge 不进入 document memory
+```
+
+### 六、验证
+
+运行 TypeScript 检查：
+
+```text
+node node_modules/typescript/bin/tsc --noEmit
+```
+
+结果：
+
+```text
+passed
+```
+
+运行精确差分测试：
+
+```text
+vitest run src/__tests__/precise-text-diff.test.ts
+```
+
+测试覆盖：
+
+```text
+中文精确替换且不包含相邻字符
+纯新增区间
+纯删除区间
+emoji 前后的 UTF-16 DOM offset
+完全相同文字不产生差异
+```
+
+结果：
+
+```text
+1 test file passed
+4 tests passed
+```
+
+## 2026-07-11：Logic Map 局部问答聚合与紧凑筛选
+
+### 修改目标
+
+本轮修改解决两个直接影响 Logic Map 可读性的问题：
+
+1. 一次 Local Window 问答此前同时显示 `Check` 与 `Answer` 两个节点，造成重复、标题不一致和连线冗余。
+2. 原固定左侧图例把层级控制、内容类型和对象状态混在同一窄栏中，较矮窗口下会显示不完整，并挤占 Logic Map 画布。
+
+### Local 问答的可视投影规则
+
+底层持久化结构保持不变。一次 Local LLM 调用仍完整保存：
+
+```text
+local user Message
+local assistant Message
+ContextSnapshot
+LLMCallRecord
+EventLog
+TimelineNode / TimelineEdge
+```
+
+Logic Map 改为使用“可视投影聚合”规则：
+
+```text
+local_question_asked + local_answer_generated
+                     ↓
+             一个可视 Check 节点
+```
+
+实现细节：
+
+- `local_question_asked` 继续存在于持久化数据和事件记录中，但不再单独渲染为 Logic Map 节点。
+- 对应的 `local_answer_generated` 作为该回合的可视代表，因为它同时关联完整 LocalThread、assistant message、LLMCallRecord、ContextSnapshot 和 comparison。
+- 首次 Local 回合显示 `Check: <用户问题主题>`。
+- 同一 Local Window 内继续提问显示 `Follow-up: <用户问题主题>`。
+- Check 的 hover 详情继续展示用户问题、选中原文和 LLM 回答摘要。
+- 点击 Check 仍然打开原 Local Window，因此完整对话没有被视觉聚合隐藏或丢失。
+
+### 同一 Local Window 的层级规则
+
+同一个 `relatedThreadId` 内的连续问答属于同一条局部逻辑：
+
+```text
+Check → Follow-up → Follow-up
+```
+
+它们在同一逻辑行上向右推进，不因为 user message 与 assistant message 分别存储而向下增加层级。
+
+只有用户在 Local assistant answer 中重新选择文本，并由该 `LocalSelection` 创建 nested LocalThread 时，才建立下一层子逻辑。新子逻辑继续遵循相同规则：一次问答投影为一个 Check，同窗口追问水平延续。
+
+### 标题一致性
+
+可视节点标题统一以用户问题为主语义来源：
+
+```text
+首次回合：Check: <local question>
+后续回合：Follow-up: <local question>
+```
+
+不再分别从用户问题和 assistant answer 生成两个可能不一致的标题。回答正文只进入 hover 详情和打开后的 Local Window，不作为第二个节点名称。
+
+### 顶部层级、筛选与图例控件
+
+删除固定占宽的 Logic Map 左侧图例布局，改为 Logic Map 标题栏中的紧凑控件：
+
+```text
+[层级选择] [Filter] [图例] [Visible logic] [缩放] [全屏]
+```
+
+层级选择支持：
+
+```text
+Main only
+One local level
+Nested logic
+All levels
+```
+
+Filter 弹层把内容类型与历史状态明确分组：
+
+```text
+Content types
+- Main reasoning
+- Local checks
+- Draft / merge ideas
+- Memory notes
+
+History states
+- Inactive history
+- Removed paths
+```
+
+每个筛选项显示当前数量。关闭某项后，Filter 按钮显示隐藏对象数量；筛选只影响当前 UI 投影，不改变任何对象状态。
+
+为避免较矮屏幕中再次出现信息截断，Filter 弹层在宽屏使用左右两栏：左栏显示内容类型，右栏显示历史状态和大型逻辑组控制；弹层同时设置基于 viewport 的最大高度与内部滚动。窄屏时两栏自动折叠为单栏，因此信息不会超出屏幕后无法访问。
+
+图例弹层专门解释颜色和节点语义，不再承担筛选功能。它明确说明 inactive / removed 是对象状态，不是新的推理类型。
+
+### Memory、Timeline 与持久化影响
+
+本轮没有删除、合并或覆盖任何持久化记录。
+
+```text
+Message：保持 user / assistant 分开存储
+EventLog：保持所有 local_message 与 llm.call 事件
+TimelineNode：底层节点不删除
+TimelineEdge：底层关系不删除
+ContextSnapshot：保持调用时真实上下文
+LLMCallRecord：保持 model、thread、snapshot、output message 关系
+LocalThread：保持完整会话历史
+ComparisonGraph：保持与 local answer 的关联
+```
+
+Logic Map 的“一个 Check”只是读取持久化结构后的 UI projection，不会让 user message 或 assistant message 从数据库、Memory、Context Review 或事件追溯中消失。
+
+筛选状态同样只属于当前 React UI state：
+
+```text
+不写入数据库
+不生成 EventLog
+不改变 active path
+不改变 memory_effect
+不改变 deleted / discarded / inactive 策略
+不进入任何 LLM ContextSnapshot
+```
+
+### Verification
+
+类型检查：
+
+```text
+node node_modules/typescript/bin/tsc --noEmit
+passed
+```
+
+新增专项测试：
+
+```text
+projects each persisted local question and answer pair as one visible check
+passed
+```
+
+页面验证结果：
+
+```text
+Logic Map 中只显示 Check: I ask poster
+不再显示独立 Answer: I ask poster
+Filter 可隐藏 Local checks
+隐藏 Local checks 后主逻辑仍保留
+Filter 显示 1 hidden
+固定左侧图例不再占用画布宽度
+```
+
+现有 `timeline-humanize.test.ts` 全文件运行仍有 8 个旧断言失败。这些断言依赖旧版已移除的 Selection 可视节点、旧 Logic 行编号或旧 merge 行归属；新增聚合测试独立通过。本轮没有为了迎合旧断言而恢复重复节点。
+
+---
+
+## 2026-07-07 - 默认工作区改为自适应 Split Pane 布局
+
+### 修改目标
+
+这次修改是为了解决窗口 resize 逻辑阻挡正常输入、默认布局空白过大、Logic Map 初始显示不完整的问题。
+
+用户反馈的核心问题是：
+
+```text
+1. 鼠标在窗口中间也会触发 resize，影响输入和选择。
+2. resize 触发区没有跟随窗口真实边界变化。
+3. 默认主窗口过高，空白太多，底部 Logic Map 被挤压。
+4. 刷新后应该回到根据屏幕大小计算出的默认排版，而不是记住错误尺寸。
+```
+
+### 新布局规则
+
+默认工作区现在不再使用自由四边 / 四角 resize。
+
+主界面改成 Split Pane：
+
+```text
+Top Workspace
+  Main Answer Window
+  vertical splitter
+  Local Window, if open
+  vertical splitter
+  Semantic Difference Map or Branch Window, if open
+
+horizontal splitter
+
+Logic Map
+```
+
+只有真实分割线可以拖动：
+
+```text
+左右窗口之间的竖线：只能横向调整相邻两个窗口宽度。
+上方工作区和 Logic Map 之间的横线：只能纵向调整两块区域高度。
+窗口内部正文、输入框、空白处、卡片中间都不能触发 resize。
+```
+
+### 默认比例
+
+刷新页面后不会读取旧的本地窗口尺寸，而是回到自适应默认比例。
+
+上方工作区按当前可见窗口数量自动分配：
+
+```text
+1 个窗口：Main = 100%
+2 个窗口：Main = 62%, Secondary = 38%
+3 个窗口：Main = 46%, Local = 27%, Right Panel = 27%
+```
+
+上下区域默认比例：
+
+```text
+Top Workspace = 76%
+Logic Map = 24%
+```
+
+这样 Logic Map 不会在空会话时占据过多屏幕。
+
+### Panel 填充规则
+
+`AppShell` 负责分配格子高度。
+
+每个主要 panel 必须填满自己所在的格子：
+
+```text
+Main Answer Window
+Local Window
+Semantic Difference Map
+Branch Window
+Logic Map
+```
+
+因此这些 panel 的外层都需要 `h-full`。
+
+原因：
+
+```text
+如果 panel 只按内容高度渲染，split-pane 分配出来的剩余空间会露出父容器背景，看起来像一大片无意义空白。
+```
+
+### 响应式规则
+
+窄屏时，顶部多个窗口会自动变成纵向排列。
+
+此时：
+
+```text
+左右窗口之间的竖向 splitter 会隐藏。
+避免竖线在移动端 / 窄屏竖排布局中变成无意义的小条。
+```
+
+### 保留但不启用的组件
+
+`ResizablePanelFrame` 文件没有删除。
+
+它目前不再被默认 `AppShell` 使用。
+
+保留原因：
+
+```text
+1. 避免批量删除。
+2. 后续如果需要独立浮动窗口模式，可以重新评估是否复用。
+3. 当前默认 workspace 只走 split-pane resize。
+```
+
+### Memory / Timeline 影响
+
+这次是纯 UI layout 修改。
+
+不会创建或修改：
+
+```text
+Message
+DocumentVersion
+TextSelection
+LocalThread
+LocalSelection
+Annotation
+RevisionBranch
+MergeRecord
+ComparisonGraph
+EventLog
+TimelineNode
+TimelineEdge
+LLMCallRecord
+ContextSnapshot
+```
+
+不会影响：
+
+```text
+LLM context
+ContextSnapshot inclusion / exclusion
+active path
+discarded / deleted / inactive memory rules
+Logic Map 数据结构
+Semantic Difference Map 数据结构
+```
+
+### Verification
+
+Ran:
+
+```text
+node node_modules\typescript\bin\tsc --noEmit
+```
+
+Result:
+
+```text
+passed
+```
+
+## 2026-07-07 - Resize Handle Blocking Content Fix
+
+### 用户问题
+
+用户反馈：
+
+```text
+鼠标在窗口中间也能触发 resize。
+这会阻止正常输入、选择文字和使用页面。
+```
+
+截图中可以看到蓝色 resize hover line 出现在内容区中间，而不是窗口边缘。
+
+### Root Cause
+
+`ResizablePanelFrame` 的 wrapper 使用了：
+
+```text
+[&>*]:h-full
+```
+
+这个 Tailwind selector 会让所有直接子元素都变成：
+
+```text
+height: 100%
+```
+
+问题是 resize handle 也是直接子元素。
+
+因此原本应该只有：
+
+```text
+top / bottom: 3px high
+left / right: 3px wide
+corner: 8px x 8px
+```
+
+的 resize handle 被错误拉伸成了整块窗口高度或宽度。
+
+这就是为什么内容区中间也会触发 resize。
+
+### Change
+
+更新：
+
+```text
+src/components/layout/ResizablePanelFrame.tsx
+```
+
+修改方式：
+
+```text
+1. 从 wrapper 上移除 [&>*]:h-full。
+2. 新增一个专门包裹窗口内容的 div：
+   <div className="h-full min-h-0 min-w-0">{children}</div>
+3. resize handles 作为 sibling 保留，但不再继承 h-full。
+```
+
+### Correct Behavior
+
+现在：
+
+```text
+窗口内容区:
+  可以正常输入、点击、选择文字、滚动。
+  不会触发 resize。
+
+窗口边界:
+  只有真实边框附近能触发 resize。
+
+四角:
+  只有角落小区域能触发双向 resize。
+```
+
+### Memory / Timeline Effect
+
+这是纯 UI hitbox 修复。
+
+不会影响：
+
+```text
+LLM context
+memory
+timeline
+event log
+document version
+local thread
+comparison graph
+annotation
+branch
+merge
+```
+
+### Verification
+
+Ran:
+
+```text
+node node_modules\typescript\bin\tsc --noEmit
+```
+
+Result:
+
+```text
+passed
+```
+
+## 2026-07-07 - Resize Edge Hitbox and Direction Audit
+
+### 用户问题
+
+用户继续指出：
+
+```text
+1. resize 必须只能在窗口真正的边边上触发。
+2. 有些地方拖动逻辑是反的或不符合直觉。
+```
+
+### 修改文件
+
+```text
+src/components/layout/ResizablePanelFrame.tsx
+```
+
+### Hitbox 修正
+
+将边界热区进一步收窄到真实边框附近：
+
+```text
+上边界: top = 0, height = 3px
+下边界: bottom = 0, height = 3px
+左边界: left = 0, width = 3px
+右边界: right = 0, width = 3px
+四个角: 12px x 12px，只在角落
+```
+
+这样内容区中间不会触发 resize。
+
+### Direction 修正
+
+之前的算法主要依赖：
+
+```text
+deltaX = currentMouseX - startMouseX
+deltaY = currentMouseY - startMouseY
+```
+
+这种方式容易在左边界 / 上边界 / 角落拖动时产生锚点漂移或方向不直观。
+
+现在改成直接几何计算：
+
+```text
+拖右边:
+  width = mouseX - originalLeft
+
+拖左边:
+  width = originalRight - mouseX
+  offsetX = originalWidth - width
+
+拖下边:
+  height = mouseY - originalTop
+
+拖上边:
+  height = originalBottom - mouseY
+  offsetY = originalHeight - height
+```
+
+四个角：
+
+```text
+右下角 = 右边规则 + 下边规则
+右上角 = 右边规则 + 上边规则
+左下角 = 左边规则 + 下边规则
+左上角 = 左边规则 + 上边规则
+```
+
+### 设计语义
+
+新的 resize 语义是：
+
+```text
+拖哪条边，哪条边跟随鼠标位置。
+没有被拖的相对边尽量保持稳定。
+横边只改变高度。
+竖边只改变宽度。
+角落同时改变宽度和高度。
+```
+
+### Refresh 行为
+
+仍然保持：
+
+```text
+拖动只影响当前页面。
+刷新后恢复默认自适应布局。
+```
+
+### Memory / Timeline Effect
+
+本轮仍然只影响 UI layout。
+
+不会进入：
+
+```text
+LLM memory
+ContextSnapshot
+EventLog
+TimelineNode
+DocumentVersion
+LocalThread
+ComparisonGraph
+```
+
+### Verification
+
+Ran:
+
+```text
+node node_modules\typescript\bin\tsc --noEmit
+```
+
+Result:
+
+```text
+passed
+```
+
+## 2026-07-07 - Resize Anchor Semantics
+
+### 用户问题
+
+用户指出 resize 的锚点语义还不准确：
+
+```text
+1. 左右边只能横向拖动。
+2. 上下边只能纵向拖动。
+3. 四个角的拖动应该让窗口边界变成鼠标移动到的位置。
+```
+
+核心意思：
+
+```text
+拖哪条边，哪条边就应该跟着鼠标。
+拖哪个角，相邻两条边就应该跟着鼠标。
+没有被拖的相对边应该保持稳定。
+```
+
+### 修改文件
+
+```text
+src/components/layout/ResizablePanelFrame.tsx
+```
+
+### Change
+
+`ResizablePanelFrame` 的 resize state 从：
+
+```text
+width
+height
+```
+
+扩展为：
+
+```text
+width
+height
+offsetX
+offsetY
+```
+
+### 新的锚点规则
+
+右边界：
+
+```text
+width = startWidth + deltaX
+offsetX 不变
+```
+
+左边界：
+
+```text
+width = startWidth - deltaX
+offsetX = startOffsetX + 实际左边界移动量
+```
+
+下边界：
+
+```text
+height = startHeight + deltaY
+offsetY 不变
+```
+
+上边界：
+
+```text
+height = startHeight - deltaY
+offsetY = startOffsetY + 实际上边界移动量
+```
+
+四个角：
+
+```text
+同时执行对应的横向规则和纵向规则。
+例如左上角 = 左边界规则 + 上边界规则。
+```
+
+### Clamp 行为
+
+如果拖动超过最小 / 最大尺寸限制：
+
+```text
+先 clamp width / height
+再根据 clamp 后的实际尺寸计算 offset
+```
+
+这样可以保证：
+
+```text
+边界不会继续跟着鼠标越过可用尺寸限制。
+```
+
+### Refresh 行为
+
+本轮继续保留上一条规则：
+
+```text
+拖动后的尺寸只存在当前页面会话。
+刷新后恢复默认自适应布局。
+```
+
+### Memory / Timeline Effect
+
+本轮修改只影响窗口边界交互。
+
+不会进入：
+
+```text
+LLM context
+ContextSnapshot
+EventLog
+TimelineNode
+TimelineEdge
+Project memory
+Conversation memory
+Local thread memory
+```
+
+### Verification
+
+Ran:
+
+```text
+node node_modules\typescript\bin\tsc --noEmit
+```
+
+Result:
+
+```text
+passed
+```
+
+## 2026-07-07 - Reset Layout on Refresh
+
+### 用户需求
+
+用户要求：
+
+```text
+每次刷新页面后，都回到一开始的默认排版。
+默认排版应该根据当前屏幕窗口大小自动生成。
+用户拖动窗口大小只影响当前页面会话。
+```
+
+### 修改文件
+
+```text
+src/components/layout/ResizablePanelFrame.tsx
+src/components/layout/AppShell.tsx
+```
+
+### Change
+
+移除了窗口尺寸持久化逻辑。
+
+之前：
+
+```text
+ResizablePanelFrame 会通过 storageKey 读取 localStorage。
+拖动窗口后会把 width / height 写入 localStorage。
+刷新页面后继续沿用上一次手动拖动的尺寸。
+```
+
+现在：
+
+```text
+ResizablePanelFrame 只保存当前 React 页面生命周期内的 width / height。
+刷新页面后状态重置。
+窗口回到 AppShell 中定义的默认自动排版。
+```
+
+### 删除范围说明
+
+本轮没有删除项目数据。
+
+本轮没有清理数据库。
+
+本轮没有批量删除文件。
+
+本轮也没有主动清理浏览器 localStorage 中的旧 key。
+
+只是让代码不再读取或写入这些 layout key：
+
+```text
+noesis-layout-main-window
+noesis-layout-local-window
+noesis-layout-semantic-map
+noesis-layout-branch-window
+noesis-layout-logic-map-expanded
+noesis-layout-logic-map-collapsed
+```
+
+即使浏览器里旧 key 还存在，也不会再影响布局。
+
+### Memory / Timeline Effect
+
+窗口大小属于 UI layout state。
+
+它不会进入：
+
+```text
+LLM context
+ContextSnapshot
+EventLog
+TimelineNode
+TimelineEdge
+DocumentVersion
+LocalThread
+Annotation
+RevisionBranch
+ComparisonGraph
+```
+
+刷新恢复默认布局不会影响任何 revision workspace memory。
+
+### Verification
+
+Ran:
+
+```text
+node node_modules\typescript\bin\tsc --noEmit
+```
+
+Result:
+
+```text
+passed
+```
+
+## 2026-07-07 - Resize Handles Restricted to Real Panel Borders
+
+### 用户问题
+
+用户反馈：
+
+```text
+不是所有框框中间都可以调整大小。
+只有窗口边界附近才应该可以调整大小。
+```
+
+截图中出现了大面积浅蓝色覆盖，说明上一版 resize handle 的可交互区域和 hover 背景侵入了窗口内容区。
+
+### Root Cause
+
+上一版使用 `<button>` 作为 resize handle。
+
+问题：
+
+```text
+1. button 本身容易带有浏览器默认交互样式。
+2. hover 背景会让大范围区域可见。
+3. 为了照顾中间分隔线，handle 命中区被放得过大。
+4. 最终导致内容区中间也像是可以 resize。
+```
+
+这不符合用户的真实需求。
+
+### Change
+
+更新：
+
+```text
+src/components/layout/ResizablePanelFrame.tsx
+```
+
+具体修改：
+
+```text
+1. resize handle 从 button 改成 div role="separator"。
+2. 去掉 handle 自身的大面积 hover background。
+3. 边界热区缩回真实边框附近。
+4. 竖边热区只保留窄条。
+5. 横边热区只保留窄条。
+6. 四个角只保留小角落热区。
+7. hover 时只显示细线或小点，不再显示大面积覆盖层。
+```
+
+### Correct Resize Rule
+
+现在的目标规则是：
+
+```text
+内容区:
+  正常点击、输入、滚动、选择文字
+  不触发 resize
+
+竖向边界:
+  只在真实边界附近可拖
+  只改变宽度
+
+横向边界:
+  只在真实边界附近可拖
+  只改变高度
+
+四个角:
+  只在角落小区域可拖
+  同时改变宽度和高度
+```
+
+### Memory / Timeline Effect
+
+本轮只修正 UI hit area。
+
+不会改变：
+
+```text
+LLM context
+memory scope
+timeline
+event log
+message
+local thread
+document version
+comparison graph
+annotation
+branch
+merge
+```
+
+### Verification
+
+Ran:
+
+```text
+node node_modules\typescript\bin\tsc --noEmit
+```
+
+Result:
+
+```text
+passed
+```
+
+## 2026-07-07 - Resize Hit Area Fix for Middle Boundaries
+
+### 用户问题
+
+用户反馈：
+
+```text
+在窗口中间分隔线附近不能稳定调整大小。
+```
+
+也就是说，Main Answer Window、Local Window、Semantic Difference Map 等窗口之间的中间边界应该可以直接拖动，但上一版只有很窄的命中区，用户在中间 gap 位置拖动时容易没有反应。
+
+### Root Cause
+
+上一版 `ResizablePanelFrame` 的边界 handle 尺寸较小：
+
+```text
+vertical edge handle width = 8px 左右
+horizontal edge handle height = 8px 左右
+```
+
+而窗口之间存在 layout gap，所以两个窗口中间会出现不好命中的区域。
+
+### Change
+
+更新：
+
+```text
+src/components/layout/ResizablePanelFrame.tsx
+```
+
+改动：
+
+```text
+1. 竖向边界 handle 从较窄命中区扩大为 16px。
+2. 横向边界 handle 从较窄命中区扩大为 16px。
+3. 四个角的 handle 扩大为 20px。
+4. hover / focus 时显示一条很细的蓝色预览线，提示当前抓到的边界。
+```
+
+### Interaction Rule
+
+规则保持不变：
+
+```text
+竖向中间边界：只能左右拖，只改变宽度。
+横向中间边界：只能上下拖，只改变高度。
+四个角：可以同时改变宽度和高度。
+```
+
+### Memory / Timeline Effect
+
+本轮修改只影响 UI resize hit area。
+
+不会改变：
+
+```text
+message
+local_thread
+context_snapshot
+timeline_node
+event_log
+memory_scope
+active_path
+deleted / discarded / inactive state
+```
+
+### Verification
+
+Ran:
+
+```text
+node node_modules\typescript\bin\tsc --noEmit
+```
+
+Result:
+
+```text
+passed
+```
+
+## 2026-07-07 - Local Follow-up, Workspace Layout, and Resizable Panels
+
+### 用户需求
+
+本轮修改针对四个界面和逻辑问题：
+
+```text
+1. 在同一个 Local Window 里继续问问题时，应该属于同一个 local thread 的 follow-up。
+   它不应该再往下创建一层逻辑，也不应该被当成新的 check。
+
+2. Local / Nested Local 的标签页需要更像树状结构，让用户看得出哪个窗口来自哪个选择。
+
+3. 整体窗口需要更适配不同屏幕尺寸，减少页面级上下滚动。
+
+4. 每个主要工作窗口需要可以拖动调节大小。
+
+同时，用户还要求：
+- 去掉 Main Answer Window 里的 Normal / Bold / Italic 那一行编辑工具栏。
+- 顶部 header 高度降低一点，图标也变小一点。
+```
+
+### 修改文件
+
+```text
+src/components/document/MainDocumentPanel.tsx
+src/components/layout/AppHeader.tsx
+src/components/layout/AppShell.tsx
+src/components/thread/SideThreadPanel.tsx
+src/components/comparison/ArgumentEvidenceComparison.tsx
+src/components/branch/RevisionBranchPanel.tsx
+src/components/timeline/VersionTimeline.tsx
+src/components/timeline/timelineHumanize.ts
+src/store/useAnswerAtlasStore.ts
+```
+
+### Main Answer Window 工具栏修改
+
+删除了主回答窗口顶部的文档编辑工具栏显示：
+
+```text
+undo / redo / Normal / list / bold / italic / link
+```
+
+注意：这里只是移除这一行 UI，不删除任何已有回答、消息、版本、事件或 timeline 数据。
+
+### 顶部 Header 修改
+
+顶部栏从较高的工具栏压缩成更轻量的工作栏：
+
+```text
+header 高度降低
+NOESIS 字号降低
+project selector 高度降低
+按钮尺寸降低
+图标尺寸降低
+search box 高度降低
+New Thread 按钮降低高度和字号
+```
+
+目的：
+
+```text
+让主工作区在小屏幕上获得更多纵向空间。
+减少用户需要上下滚动的情况。
+```
+
+### Local Follow-up 逻辑修改
+
+之前的问题：
+
+```text
+用户在同一个 Local Window 继续问问题时，
+logic map 有时会把它当成新的 check 或新的下钻层级。
+```
+
+这和用户的真实意图不一致。因为同一个 Local Window 内继续输入问题，本质是：
+
+```text
+围绕同一个 selected text / local thread 的连续追问
+```
+
+而不是：
+
+```text
+重新选择了一段新文本
+或创建了 nested local thread
+```
+
+现在的规则：
+
+```text
+同一个 local_thread 中的第一条 local question:
+  显示为 Local question / Check
+
+同一个 local_thread 中后续 user question:
+  显示为 Follow-up
+  继续挂在同一个 local_thread 下
+  不创建新的 nested level
+  不创建新的 check focus
+
+只有当用户在 local answer / revision suggestion 中再次选中文字并点击 Ask Locally:
+  才创建 LocalSelection
+  才创建 Nested LocalThread
+  才进入下一层局部推理
+```
+
+### Store 数据流修改
+
+在 `askLocalQuestion` 中加入了本地线程 follow-up 判断。
+
+判断逻辑：
+
+```text
+如果当前 local_thread 里已经存在非 deleted 的 user message，
+则新问题被视为 local follow-up。
+```
+
+follow-up 的节点连接方式：
+
+```text
+优先连接到当前 local_thread 内最新的 local question / local answer node。
+如果找不到，再回退到当前 active version node。
+```
+
+这样可以避免同一个 Local Window 的连续追问被错误接到全局 active node 或新的逻辑层。
+
+### Memory 规则
+
+本轮没有改变底层 memory scope 的边界，只是修正 follow-up 的归属。
+
+现在同一个 Local Window 内继续问问题时：
+
+```text
+Message.threadId = current local_thread id
+memory_scope = local_thread
+ContextSnapshot 包含当前 local_thread 的相关历史
+不进入 main conversation 默认 memory
+不进入 document memory
+不自动成为 annotation
+不自动成为 branch
+不自动 merge 进 document
+```
+
+如果用户选择 local answer 中的新片段并 Ask Locally：
+
+```text
+LocalSelection 进入 nested local flow
+Nested LocalThread 拥有自己的局部 memory scope
+父 local_thread 会作为 nested context 的来源之一
+```
+
+### Logic Map 命名规则
+
+`timelineHumanize.ts` 中新增了 follow-up 判断。
+
+显示规则：
+
+```text
+local_question_asked:
+  第一条问题 = Check
+  同一 local_thread 后续问题 = Follow-up
+
+local_answer_generated:
+  第一条回答 = Answer
+  同一 local_thread 后续回答 = Follow-up answer
+```
+
+同时，同一 local_thread 的 follow-up 会继承原来的 local focus，不再单独制造新的逻辑分组。
+
+### Thread Tree 可视化修改
+
+Local Window 顶部的 thread tabs 改成更清楚的树状提示：
+
+```text
+Thread tree
+Local thread
+Nested thread
+Current
+N follow-up
+```
+
+每个 thread row 会显示：
+
+```text
+thread 类型
+当前是否 active
+选中文本摘要
+该 thread 内 user question 数量
+```
+
+视觉上增加了左侧连接线和缩进，让用户更容易看出：
+
+```text
+main selection
+  -> local thread
+      -> nested thread
+```
+
+### 自适应布局修改
+
+`AppShell` 的整体布局从页面级滚动改为更接近固定工作台：
+
+```text
+外层使用 h-screen
+关闭页面级 overflow auto
+主区域使用 min-h-0 和内部滚动
+降低上下 padding 和 gap
+降低 Logic Map 展开时的高度
+```
+
+目标：
+
+```text
+让 Main Answer Window / Local Window / Semantic Difference Map / Logic Map
+在同一屏中更稳定地排列。
+```
+
+### 可拖动调节大小
+
+为主要工作面板加入浏览器原生 resize 能力：
+
+```text
+Main Answer Window: resize-x
+Local Window: resize-x
+Semantic Difference Map: resize-x
+Revision Branch Panel: resize-x
+Logic Map: resize-y
+```
+
+这是第一版轻量实现：
+
+```text
+用户可以手动拖动窗口边界改变大小。
+当前大小不写入数据库。
+当前大小不影响 memory。
+当前大小不影响 timeline。
+```
+
+后续如果需要更稳定的 split pane，可以升级为持久化 layout state。
+
+### 数据与删除影响
+
+本轮没有删除任何数据库数据。
+
+本轮没有批量删除文件。
+
+本轮没有改变 deleted / discarded 的规则。
+
+本轮没有让 local follow-up 自动进入全局 memory。
+
+### 验证
+
+运行：
+
+```text
+node node_modules\typescript\bin\tsc --noEmit
+```
+
+结果：
+
+```text
+passed
+```
+
+## 2026-07-12 - 恢复 Layer 1 概览并修正 Logic Map Check 语义
+
+### 用户需求
+
+本轮不是回退整个 Semantic Difference Map，而是组合两个版本的优点：
+
+```text
+恢复旧版 Layer 1 Difference Overview 的完整概览设计。
+保留新版 Layer 2 的精确变化列表、字符级范围和按需展开。
+Logic Map 中的 Check 必须显示被选中的原句，而不是用户输入的问题。
+同一 Local Window 内继续提问属于 Follow-up，不再创建新的 Check 或更深一层。
+```
+
+### Semantic Difference Map 修改
+
+修改 `src/components/comparison/CompactSemanticDifferenceMapView.tsx`。
+
+Layer 1 重新提供：整体 difference summary、Meaning effect、Risk level、Main change、Changed block count，以及 Added / Removed / Rewritten / Moved / Claim changed / Tone changed 统计。
+
+其中 Added、Removed、Rewritten 和 Changed Blocks 来自确定性精确文本差分；Meaning、Risk、Moved、Claim changed、Tone changed 使用后台语义增强结果。
+
+Layer 2 继续只显示真实变化位置：unchanged 不显示；默认最多 6 个变化；点击后才展开 Original 与 Current 上下文；高亮继续使用精确 UTF-16 offset 和 DOM Range；Board chat 继续默认折叠。因此本轮只恢复 Layer 1，没有恢复旧版拥挤的后续层卡片。
+
+### Logic Map Check 语义修改
+
+修改：
+
+```text
+src/components/timeline/timelineHumanize.ts
+src/components/timeline/BranchLane.tsx
+src/__tests__/timeline-humanize.test.ts
+```
+
+可见 Logic Map 仍将 `local_question_asked` 与 `local_answer_generated` 聚合为一个可见回合，避免同一次问答出现两个重复节点。
+
+首个 Local 回合现在显示：
+
+```text
+标题 = Check: TextSelection.selectedText / LocalSelection.selectedText
+详情 Question = 对应 local user message
+详情 Reply = 对应 local assistant message
+```
+
+如果 TextSelection 和 LocalThread 都存在选中文字，以当前 LocalThread 的 `selectedText` 为准，因为它表示该 Local Window 实际绑定的持久化来源；Anchor 作为兼容回退。
+
+同一 Local Window 的第一个回答显示 Check；第二个及后续回答显示 Follow-up，并继承同一个 selected-text logic focus、保持同一条 Logic Map lane。只有重新选择另一段主回答或 Local 回答文字，才建立新的 Check 和下一层逻辑。
+
+### Memory、Timeline 与持久化影响
+
+本轮没有删除文件、消息、线程、选择、ComparisonGraph 或任何历史数据。TextSelection、LocalSelection、LocalThread、Messages、ContextSnapshot、LLMCallRecord、EventLog、TimelineNode、TimelineEdge、ComparisonGraph 和 ComparisonRun 的持久化方式保持不变。
+
+本轮只修改 Logic Map 对持久化对象的可视投影和标题来源，不会把 Local 内容自动提升进 main memory，也不会改变 deleted、discarded、inactive 或 unmerged branch 的 Context Builder 排除规则。Layer 1 卡片和 Logic Map 可见标题属于 UI projection，不进入 LLM ContextSnapshot。
+
+### 验证
+
+```text
+TypeScript: passed
+精确差分测试: 4 passed
+Check / Follow-up 定向 Logic Map 测试: 5 passed
+```
+
 ## 2026-07-07 - Workspace Tree Button Reposition
 
 ### User request
@@ -11153,6 +12689,197 @@ Ran:
 
 ```text
 node node_modules/typescript/bin/tsc --noEmit
+```
+
+Result:
+
+```text
+passed
+```
+
+## 2026-07-07 - Full-edge Window Resizing
+
+### 用户需求
+
+用户指出上一版只是使用浏览器原生 `resize-x` / `resize-y`，实际只能在右下角或默认 resize handle 调整，不符合工作区窗口的交互预期。
+
+用户真正需要的是：
+
+```text
+1. 每个主要窗口都可以横向和纵向调整。
+2. 不只能拖右下角。
+3. 竖向边界只能左右拖，用来改变宽度。
+4. 横向边界只能上下拖，用来改变高度。
+5. 四个角可以同时改变宽度和高度。
+6. 这些调整是 workspace layout 行为，不应该影响 memory / timeline / LLM context。
+```
+
+### 修改文件
+
+```text
+src/components/layout/ResizablePanelFrame.tsx
+src/components/layout/AppShell.tsx
+src/components/document/MainDocumentPanel.tsx
+src/components/thread/SideThreadPanel.tsx
+src/components/comparison/ArgumentEvidenceComparison.tsx
+src/components/branch/RevisionBranchPanel.tsx
+src/components/timeline/VersionTimeline.tsx
+```
+
+### 新增 ResizablePanelFrame
+
+新增：
+
+```text
+src/components/layout/ResizablePanelFrame.tsx
+```
+
+这是一个专门用于窗口尺寸调整的外层 frame。
+
+它提供八个拖拽区域：
+
+```text
+n  = 上边界，只调整高度
+s  = 下边界，只调整高度
+e  = 右边界，只调整宽度
+w  = 左边界，只调整宽度
+ne = 右上角，同时调整宽度和高度
+nw = 左上角，同时调整宽度和高度
+se = 右下角，同时调整宽度和高度
+sw = 左下角，同时调整宽度和高度
+```
+
+### 拖动规则
+
+拖动时读取窗口当前尺寸：
+
+```text
+startWidth
+startHeight
+startPointerX
+startPointerY
+```
+
+然后根据拖动方向计算新尺寸：
+
+```text
+拖右边界: width = startWidth + deltaX
+拖左边界: width = startWidth - deltaX
+拖下边界: height = startHeight + deltaY
+拖上边界: height = startHeight - deltaY
+拖角落: 同时执行横向和纵向规则
+```
+
+所有尺寸都会经过 clamp：
+
+```text
+width >= minWidth
+height >= minHeight
+width <= maxWidth 或当前 viewport 限制
+height <= maxHeight 或当前 viewport 限制
+```
+
+这样避免窗口被拖到完全不可用。
+
+### Layout 接入方式
+
+`AppShell` 现在不再依赖固定 grid track 来放置上方工作区。
+
+上方窗口改成：
+
+```text
+flex row workspace
+  Main Answer Window
+  Local Window, if open
+  Semantic Difference Map or Branch Panel, if open
+```
+
+下方 Logic Map 独立作为可调高度区域：
+
+```text
+ResizablePanelFrame
+  Logic Map
+```
+
+### 原生 resize 移除
+
+移除了这些组件上的原生 Tailwind resize class：
+
+```text
+resize-x
+resize-y
+```
+
+原因：
+
+```text
+原生 resize 和自定义边界拖动会产生两套不一致的交互。
+现在所有窗口尺寸调整统一交给 ResizablePanelFrame。
+```
+
+### 尺寸状态
+
+窗口尺寸会保存到浏览器 localStorage：
+
+```text
+noesis-layout-main-window
+noesis-layout-local-window
+noesis-layout-semantic-map
+noesis-layout-branch-window
+noesis-layout-logic-map-expanded
+noesis-layout-logic-map-collapsed
+```
+
+这属于本地 UI layout preference。
+
+它不会写入项目数据库。
+
+它不会进入 LLM context。
+
+它不会生成 EventLog。
+
+它不会生成 TimelineNode。
+
+它不会改变任何 memory scope。
+
+### Memory 影响
+
+本轮修改只影响界面尺寸和用户视图。
+
+不会改变：
+
+```text
+Message
+DocumentVersion
+TextSelection
+LocalThread
+LocalSelection
+Annotation
+RevisionBranch
+MergeRecord
+ComparisonGraph
+EventLog
+TimelineNode
+TimelineEdge
+LLMCallRecord
+ContextSnapshot
+```
+
+所以：
+
+```text
+调整窗口大小不会进入 LLM 记忆。
+调整窗口大小不会影响 future context。
+调整窗口大小不会改变 active path。
+调整窗口大小不会改变 deleted / discarded / inactive 的规则。
+```
+
+### Verification
+
+Ran:
+
+```text
+node node_modules\typescript\bin\tsc --noEmit
 ```
 
 Result:

@@ -404,6 +404,9 @@ export function VersionTimeline({
     summary: TimelineImpactSummary;
   } | null>(null);
   const [showInactive, setShowInactive] = useState(false);
+  const [showMain, setShowMain] = useState(true);
+  const [showLocal, setShowLocal] = useState(true);
+  const [showDrafts, setShowDrafts] = useState(true);
   const [showMemory, setShowMemory] = useState(true);
   const [showRemovedPaths, setShowRemovedPaths] = useState(false);
   const [collapseLargeBranches, setCollapseLargeBranches] = useState(true);
@@ -454,6 +457,9 @@ export function VersionTimeline({
         },
         {
           showInactive,
+          showMain,
+          showLocal,
+          showDrafts,
           showMemory,
           showRemovedPaths,
           maxVisibleDepth,
@@ -468,7 +474,10 @@ export function VersionTimeline({
       documents,
       logicAssignments,
       maxVisibleDepth,
+      showDrafts,
       showInactive,
+      showLocal,
+      showMain,
       showMemory,
       showRemovedPaths,
       threadMessages,
@@ -487,6 +496,27 @@ export function VersionTimeline({
   const inactiveCount = humanTimeline.inactiveCount;
   const removedPathCount = humanTimeline.removedPathCount;
   const foldedBranchCount = humanTimeline.foldedBranchCount;
+  const categoryCounts = useMemo(() => {
+    const nodes = Object.values(versionNodes);
+
+    return {
+      main: nodes.filter((node) =>
+        node.nodeType === "document_created" ||
+        node.nodeType === "document_revised" ||
+        node.nodeType === "reverted"
+      ).length,
+      local: nodes.filter((node) => node.nodeType === "local_answer_generated").length,
+      drafts: nodes.filter((node) =>
+        node.nodeType === "branch_created" ||
+        node.nodeType === "revision_generated" ||
+        node.nodeType === "merged"
+      ).length,
+      memory: nodes.filter((node) =>
+        node.nodeType === "annotation_added" ||
+        node.nodeType === "annotation_deleted"
+      ).length
+    };
+  }, [versionNodes]);
   const visibleLanes = humanTimeline.lanes;
   const laneLayouts = useMemo(() => {
     const maxStackByLane = new Map<TimelineLaneId, number>();
@@ -943,7 +973,7 @@ export function VersionTimeline({
   if (isCollapsed) {
     return (
       <section
-        className={`panel flex min-h-0 items-center overflow-hidden rounded-lg max-[900px]:col-span-1 max-[900px]:col-start-auto ${
+        className={`panel flex h-full min-h-0 items-center overflow-hidden rounded-lg max-[900px]:col-span-1 max-[900px]:col-start-auto ${
           isNavigationCollapsed
             ? "col-span-full"
             : "col-span-full min-[901px]:col-start-1"
@@ -975,34 +1005,41 @@ export function VersionTimeline({
 
   return (
     <section
-      className={`panel min-h-0 overflow-hidden rounded-lg max-[900px]:col-span-1 max-[900px]:col-start-auto max-[900px]:h-[300px] ${
+      className={`panel h-full min-h-0 overflow-hidden rounded-lg max-[900px]:col-span-1 max-[900px]:col-start-auto max-[900px]:h-[300px] ${
         isNavigationCollapsed
           ? "col-span-full"
           : "col-span-full min-[901px]:col-start-1"
       }`}
     >
-      <div className="flex h-full">
-        <BranchLane
-          inactiveCount={inactiveCount}
-          removedPathCount={removedPathCount}
-          foldedBranchCount={foldedBranchCount}
-          showInactive={showInactive}
-          showMemory={showMemory}
-          showRemovedPaths={showRemovedPaths}
-          collapseLargeBranches={collapseLargeBranches}
-          maxVisibleDepth={maxVisibleDepth}
-          onToggleInactive={() => setShowInactive((value) => !value)}
-          onToggleMemory={() => setShowMemory((value) => !value)}
-          onToggleRemovedPaths={() => setShowRemovedPaths((value) => !value)}
-          onToggleCollapseLargeBranches={() =>
-            setCollapseLargeBranches((value) => !value)
-          }
-          onMaxVisibleDepthChange={setMaxVisibleDepth}
-        />
-        <div className="relative min-w-0 flex-1">
+      <div className="h-full">
+        <div className="relative h-full min-w-0 flex-1">
           <div className="flex h-12 items-center justify-between border-b border-line px-4">
             <h2 className="text-lg font-bold text-ink">Logic Map</h2>
             <div className="flex items-center gap-2">
+              <BranchLane
+                categoryCounts={categoryCounts}
+                inactiveCount={inactiveCount}
+                removedPathCount={removedPathCount}
+                foldedBranchCount={foldedBranchCount}
+                showMain={showMain}
+                showLocal={showLocal}
+                showDrafts={showDrafts}
+                showInactive={showInactive}
+                showMemory={showMemory}
+                showRemovedPaths={showRemovedPaths}
+                collapseLargeBranches={collapseLargeBranches}
+                maxVisibleDepth={maxVisibleDepth}
+                onToggleMain={() => setShowMain((value) => !value)}
+                onToggleLocal={() => setShowLocal((value) => !value)}
+                onToggleDrafts={() => setShowDrafts((value) => !value)}
+                onToggleInactive={() => setShowInactive((value) => !value)}
+                onToggleMemory={() => setShowMemory((value) => !value)}
+                onToggleRemovedPaths={() => setShowRemovedPaths((value) => !value)}
+                onToggleCollapseLargeBranches={() =>
+                  setCollapseLargeBranches((value) => !value)
+                }
+                onMaxVisibleDepthChange={setMaxVisibleDepth}
+              />
               {logicControlToggle}
               {zoomControls}
               <button
@@ -1041,10 +1078,34 @@ export function VersionTimeline({
             <div>
               <h2 className="text-lg font-bold text-ink">Logic Map</h2>
               <p className="text-xs text-muted">
-                Compact graph with hover details. Independent local questions form separate logic rows.
+                Local turns are grouped into readable checks; nested selections create child rows.
               </p>
             </div>
             <div className="flex items-center gap-2">
+              <BranchLane
+                categoryCounts={categoryCounts}
+                inactiveCount={inactiveCount}
+                removedPathCount={removedPathCount}
+                foldedBranchCount={foldedBranchCount}
+                showMain={showMain}
+                showLocal={showLocal}
+                showDrafts={showDrafts}
+                showInactive={showInactive}
+                showMemory={showMemory}
+                showRemovedPaths={showRemovedPaths}
+                collapseLargeBranches={collapseLargeBranches}
+                maxVisibleDepth={maxVisibleDepth}
+                onToggleMain={() => setShowMain((value) => !value)}
+                onToggleLocal={() => setShowLocal((value) => !value)}
+                onToggleDrafts={() => setShowDrafts((value) => !value)}
+                onToggleInactive={() => setShowInactive((value) => !value)}
+                onToggleMemory={() => setShowMemory((value) => !value)}
+                onToggleRemovedPaths={() => setShowRemovedPaths((value) => !value)}
+                onToggleCollapseLargeBranches={() =>
+                  setCollapseLargeBranches((value) => !value)
+                }
+                onMaxVisibleDepthChange={setMaxVisibleDepth}
+              />
               {zoomControls}
               <button
                 type="button"
@@ -1058,23 +1119,6 @@ export function VersionTimeline({
             </div>
           </div>
           <div className="flex min-h-0 flex-1">
-            <BranchLane
-              inactiveCount={inactiveCount}
-              removedPathCount={removedPathCount}
-              foldedBranchCount={foldedBranchCount}
-              showInactive={showInactive}
-              showMemory={showMemory}
-              showRemovedPaths={showRemovedPaths}
-              collapseLargeBranches={collapseLargeBranches}
-              maxVisibleDepth={maxVisibleDepth}
-              onToggleInactive={() => setShowInactive((value) => !value)}
-              onToggleMemory={() => setShowMemory((value) => !value)}
-              onToggleRemovedPaths={() => setShowRemovedPaths((value) => !value)}
-              onToggleCollapseLargeBranches={() =>
-                setCollapseLargeBranches((value) => !value)
-              }
-              onMaxVisibleDepthChange={setMaxVisibleDepth}
-            />
             <TimelineGraphCanvas
               positionedNodes={positionedNodes}
               positionedById={positionedById}

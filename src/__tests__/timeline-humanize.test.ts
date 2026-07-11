@@ -44,7 +44,8 @@ function conversationMessage(
 function threadMessage(
   id: string,
   role: ThreadMessage["role"],
-  content: string
+  content: string,
+  createdAt = "2026-07-06T00:00:00.000Z"
 ): ThreadMessage {
   return {
     id,
@@ -53,7 +54,7 @@ function threadMessage(
     content,
     contentState: "normal",
     includeInContext: true,
-    createdAt: "2026-07-06T00:00:00.000Z"
+    createdAt
   };
 }
 
@@ -162,17 +163,75 @@ describe("timeline humanized logical source layout", () => {
       }
     );
 
-    const secondCheck = result.nodes.find((item) => item.id === "v-selection-two");
-    const firstCheck = result.nodes.find((item) => item.id === "v-selection-one");
     const firstSuggestion = result.nodes.find(
       (item) => item.id === "v-local-answer-one"
     );
 
-    expect(secondCheck?.visualParentId).toBe("v-created-main");
-    expect(secondCheck?.logicalDepth).toBe(1);
-    expect(firstSuggestion?.laneId).not.toBe(firstCheck?.laneId);
-    expect(firstSuggestion?.title).toContain("Answer: Can this sentence");
-    expect(secondCheck?.laneId).not.toBe(firstCheck?.laneId);
+    expect(result.nodes.find((item) => item.id === "v-selection-one")).toBeUndefined();
+    expect(result.nodes.find((item) => item.id === "v-selection-two")).toBeUndefined();
+    expect(firstSuggestion?.visualParentId).toBe("v-created-main");
+    expect(firstSuggestion?.logicalDepth).toBe(1);
+    expect(firstSuggestion?.title).toContain("Check: First selected sentence");
+    expect(firstSuggestion?.subtitle).toContain("Question: Can this sentence");
+  });
+
+  it("projects each persisted local question and answer pair as one visible check", () => {
+    const nodes = [
+      node("v-created-main", "document_created", "2026-07-06T00:00:00.000Z"),
+      node("v-local-question-one", "local_question_asked", "2026-07-06T00:01:00.000Z", {
+        parentId: "v-created-main",
+        relatedAnchorId: "anchor-one",
+        relatedThreadId: "thread-one"
+      }),
+      node("v-local-answer-one", "local_answer_generated", "2026-07-06T00:02:00.000Z", {
+        parentId: "v-local-question-one",
+        relatedAnchorId: "anchor-one",
+        relatedThreadId: "thread-one"
+      }),
+      node("v-local-question-two", "local_question_asked", "2026-07-06T00:03:00.000Z", {
+        parentId: "v-local-answer-one",
+        relatedAnchorId: "anchor-one",
+        relatedThreadId: "thread-one"
+      }),
+      node("v-local-answer-two", "local_answer_generated", "2026-07-06T00:04:00.000Z", {
+        parentId: "v-local-question-two",
+        relatedAnchorId: "anchor-one",
+        relatedThreadId: "thread-one"
+      })
+    ];
+    const result = build(
+      nodes,
+      {
+        "anchor-one": {
+          id: "anchor-one",
+          documentId: "doc-test",
+          selectedText: "Main AAAI paper deadline",
+          anchorType: "text_selection",
+          sourceMessageId: "rev-message-assistant-main",
+          createdAt: "2026-07-06T00:00:30.000Z"
+        }
+      },
+      {
+        threadMessages: {
+          "msg-user-one": threadMessage("msg-user-one", "user", "Is there a poster deadline?", "2026-07-06T00:01:00.000Z"),
+          "msg-assistant-one": threadMessage("msg-assistant-one", "assistant", "The poster deadline follows notification.", "2026-07-06T00:02:00.000Z"),
+          "msg-user-two": threadMessage("msg-user-two", "user", "What format is required?", "2026-07-06T00:03:00.000Z"),
+          "msg-assistant-two": threadMessage("msg-assistant-two", "assistant", "Use the conference poster template.", "2026-07-06T00:04:00.000Z")
+        }
+      }
+    );
+
+    expect(result.nodes.find((item) => item.id === "v-local-question-one")).toBeUndefined();
+    expect(result.nodes.find((item) => item.id === "v-local-question-two")).toBeUndefined();
+
+    const firstCheck = result.nodes.find((item) => item.id === "v-local-answer-one");
+    const followUp = result.nodes.find((item) => item.id === "v-local-answer-two");
+
+    expect(firstCheck?.shortTitle).toContain("Check: First selected sentence");
+    expect(firstCheck?.subtitle).toContain("Question: Is there a poster");
+    expect(followUp?.shortTitle).toContain("Follow-up: What format");
+    expect(followUp?.visualParentId).toBe("v-local-answer-one");
+    expect(followUp?.laneId).toBe(firstCheck?.laneId);
   });
 
   it("attaches checks from local answers to the source local answer", () => {
@@ -222,7 +281,7 @@ describe("timeline humanized logical source layout", () => {
     expect(localCheck?.laneId).not.toBe(parentSuggestion?.laneId);
   });
 
-  it("splits different local questions on the same selected text into separate logic focuses", () => {
+  it("keeps follow-ups in one Local Window on the selected-text logic branch", () => {
     const nodes = [
       node("v-created-main", "document_created", "2026-07-06T00:00:00.000Z"),
       node("v-selection-one", "anchor_selected", "2026-07-06T00:01:00.000Z", {
@@ -257,18 +316,19 @@ describe("timeline humanized logical source layout", () => {
           "msg-user-one": threadMessage(
             "msg-user-one",
             "user",
-            "Can this be less absolute and more cautious?"
+            "Can this be less absolute and more cautious?",
+            "2026-07-06T00:01:00.000Z"
           ),
           "msg-user-two": threadMessage(
             "msg-user-two",
             "user",
-            "Add historical evidence or an example here."
+            "Add historical evidence or an example here.",
+            "2026-07-06T00:03:00.000Z"
           )
         }
       }
     );
 
-    const selectedSource = result.nodes.find((item) => item.id === "v-selection-one");
     const toneSuggestion = result.nodes.find(
       (item) => item.id === "v-local-answer-one"
     );
@@ -276,15 +336,18 @@ describe("timeline humanized logical source layout", () => {
       (item) => item.id === "v-local-answer-two"
     );
 
-    expect(toneSuggestion?.visualParentId).toBe("v-selection-one");
-    expect(evidenceSuggestion?.visualParentId).toBe("v-selection-one");
-    expect(toneSuggestion?.laneId).not.toBe(evidenceSuggestion?.laneId);
-    expect(toneSuggestion?.laneId).not.toBe(selectedSource?.laneId);
-    expect(toneSuggestion?.logicFocusLabel).toBe("tone / certainty");
-    expect(evidenceSuggestion?.logicFocusLabel).toBe("evidence / examples");
+    expect(toneSuggestion?.visualParentId).toBe("v-created-main");
+    expect(evidenceSuggestion?.visualParentId).toBe("v-local-answer-one");
+    expect(toneSuggestion?.laneId).toBe(evidenceSuggestion?.laneId);
+    expect(toneSuggestion?.logicFocusLabel).toContain("First selected sentence");
+    expect(evidenceSuggestion?.logicFocusLabel).toBe(
+      toneSuggestion?.logicFocusLabel
+    );
+    expect(toneSuggestion?.shortTitle).toContain("Check: First selected sentence");
+    expect(evidenceSuggestion?.shortTitle).toContain("Follow-up: Add historical");
   });
 
-  it("resumes an earlier logic focus after an intervening different focus", () => {
+  it("keeps consecutive follow-ups in the same Local Window on one lane", () => {
     const nodes = [
       node("v-created-main", "document_created", "2026-07-06T00:00:00.000Z"),
       node("v-selection-one", "anchor_selected", "2026-07-06T00:01:00.000Z", {
@@ -324,17 +387,20 @@ describe("timeline humanized logical source layout", () => {
           "msg-user-one": threadMessage(
             "msg-user-one",
             "user",
-            "Can this be less absolute and more cautious?"
+            "Can this be less absolute and more cautious?",
+            "2026-07-06T00:01:00.000Z"
           ),
           "msg-user-two": threadMessage(
             "msg-user-two",
             "user",
-            "Add historical evidence or an example here."
+            "Add historical evidence or an example here.",
+            "2026-07-06T00:02:30.000Z"
           ),
           "msg-user-three": threadMessage(
             "msg-user-three",
             "user",
-            "Make the cautious wording a little clearer."
+            "Make the cautious wording a little clearer.",
+            "2026-07-06T00:03:30.000Z"
           )
         }
       }
@@ -350,10 +416,11 @@ describe("timeline humanized logical source layout", () => {
       (item) => item.id === "v-local-answer-three"
     );
 
+    expect(evidenceSuggestion?.laneId).toBe(firstToneSuggestion?.laneId);
     expect(resumedToneSuggestion?.laneId).toBe(firstToneSuggestion?.laneId);
-    expect(resumedToneSuggestion?.laneId).not.toBe(evidenceSuggestion?.laneId);
-    expect(resumedToneSuggestion?.visualParentId).toBe("v-local-answer-one");
-    expect(resumedToneSuggestion?.resumedFromId).toBe("v-local-answer-one");
+    expect(evidenceSuggestion?.visualParentId).toBe("v-local-answer-one");
+    expect(resumedToneSuggestion?.visualParentId).toBe("v-local-answer-two");
+    expect(resumedToneSuggestion?.resumedFromId).toBeUndefined();
   });
 
   it("lets a user correction move a node back to an earlier logic focus", () => {
@@ -391,19 +458,22 @@ describe("timeline humanized logical source layout", () => {
           "msg-user-one": threadMessage(
             "msg-user-one",
             "user",
-            "Can this be less absolute and more cautious?"
+            "Can this be less absolute and more cautious?",
+            "2026-07-06T00:01:00.000Z"
           ),
           "msg-user-two": threadMessage(
             "msg-user-two",
             "user",
-            "Add historical evidence or an example here."
+            "Add historical evidence or an example here.",
+            "2026-07-06T00:02:30.000Z"
           )
         },
         logicAssignments: {
           "v-local-answer-two": {
             nodeId: "v-local-answer-two",
-            logicFocusKey: "anchor:anchor-one:focus:certainty-tone",
-            logicFocusLabel: "tone / certainty",
+            logicFocusKey:
+              "anchor:anchor-one:focus:selected-first selected sentence",
+            logicFocusLabel: "First selected sentence",
             targetNodeId: "v-local-answer-one",
             source: "user",
             reason: "User moved this answer back to the tone check."

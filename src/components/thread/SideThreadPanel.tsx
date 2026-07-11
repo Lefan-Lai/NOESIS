@@ -272,6 +272,7 @@ export function SideThreadPanel({
       fullLabel: string;
       status: LocalThread["status"];
       messageCount: number;
+      questionCount: number;
       mapCount: number;
       isCurrent: boolean;
       isDraft: boolean;
@@ -291,16 +292,18 @@ export function SideThreadPanel({
         .find((message) => message.role === "user");
       const isCurrent = item.id === thread.id;
       const messageCount = messageCountByThreadId.get(item.id) ?? 0;
+      const questionCount = Object.values(messages).filter(
+        (message) =>
+          message.threadId === item.id &&
+          message.role === "user" &&
+          message.contentState !== "deleted"
+      ).length;
       const mapCount = Object.values(comparisons).filter(
         (comparison) =>
           comparison.status !== "deleted" &&
           comparison.anchorId === item.anchorId
       ).length;
-      const role = isCurrent
-        ? "Current"
-        : depth === 0
-          ? "Root"
-          : "Follow-up";
+      const role = depth === 0 ? "Local thread" : "Nested thread";
       const label = compactLabel(
         firstQuestion?.content ?? item.selectedText,
         role
@@ -314,6 +317,7 @@ export function SideThreadPanel({
         fullLabel: firstQuestion?.content ?? item.selectedText ?? role,
         status: item.status,
         messageCount,
+        questionCount,
         mapCount,
         isCurrent,
         isDraft: messageCount === 0
@@ -447,17 +451,17 @@ export function SideThreadPanel({
 
   return (
     <section
-      className={`panel min-h-0 overflow-hidden rounded-lg max-[900px]:h-[520px] ${
+      className={`panel h-full min-h-0 min-w-[300px] overflow-hidden rounded-lg max-[900px]:h-[520px] ${
         chainRole === "parent" ? "border-blue-100 bg-blue-50/30" : ""
       }`}
     >
       <div className="flex h-full flex-col">
-        <div className="flex h-14 items-center justify-between gap-3 border-b border-line px-4">
+        <div className="flex h-12 items-center justify-between gap-3 border-b border-line px-4">
           <div className="flex min-w-0 items-baseline gap-2">
-            <h2 className="truncate text-lg font-bold text-ink">
+            <h2 className="truncate text-base font-bold text-ink">
               Ask Locally
             </h2>
-            <span className="shrink-0 text-sm font-medium text-muted">
+            <span className="shrink-0 text-xs font-medium text-muted">
               (local context)
             </span>
           </div>
@@ -507,22 +511,27 @@ export function SideThreadPanel({
           </div>
         </div>
         {thread && (
-          <div className="border-b border-line bg-slate-50/70 px-3 py-2">
+          <div className="border-b border-line bg-slate-50/80 px-3 py-2">
             <div className="mb-1 flex items-center justify-between gap-2">
               <span className="text-[11px] font-bold uppercase tracking-wide text-muted">
-                Local thread tree
+                Thread tree
               </span>
               <span className="text-[11px] font-semibold text-muted">
-                Empty drafts hide after switching
+                follow-ups stay in one branch
               </span>
             </div>
-            <div className="thin-scrollbar max-h-32 space-y-1 overflow-auto pr-1">
+            <div className="thin-scrollbar max-h-36 space-y-1 overflow-auto border-l border-slate-200 pl-2 pr-1">
               {threadTreeItems.map((item) => (
                 <div
                   key={item.id}
-                  className="flex items-center"
-                  style={{ paddingLeft: item.depth * 16 }}
+                  className="relative flex items-center"
+                  style={{ paddingLeft: item.depth * 18 }}
                 >
+                  <span
+                    className={`absolute -left-[13px] top-1/2 h-px w-3 ${
+                      item.depth === 0 ? "bg-transparent" : "bg-slate-300"
+                    }`}
+                  />
                   {item.depth > 0 && (
                     <span className="mr-2 h-px w-4 shrink-0 bg-slate-300" />
                   )}
@@ -546,11 +555,16 @@ export function SideThreadPanel({
                       }`}
                     />
                     <span className="shrink-0 font-bold opacity-80">
-                      {item.role}
+                      {item.isCurrent ? "Current" : item.role}
                     </span>
                     <span className="min-w-0 flex-1 truncate font-semibold">
                       {item.label}
                     </span>
+                    {item.questionCount > 1 && (
+                      <span className="shrink-0 rounded-full bg-white/20 px-1.5 py-0.5 text-[10px] font-bold">
+                        {item.questionCount - 1} follow-up
+                      </span>
+                    )}
                     {item.isDraft && (
                       <span className="shrink-0 rounded-full bg-white/20 px-1.5 py-0.5 text-[10px] font-bold">
                         draft
